@@ -14,6 +14,7 @@ struct SessionSnapshot {
 	std::optional<std::string> keyFingerprint;
 	LocalResetState reset = LocalResetState::None;
 	SyncCheckpoint checkpoint;
+	bool accountDeletePending = false;
 };
 
 [[nodiscard]] std::optional<std::string> EncodeSessionSnapshot(

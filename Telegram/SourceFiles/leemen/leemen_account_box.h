@@ -7,5 +7,6 @@ class SessionController;
 namespace Leemen {
 
 void ShowLeemenAccount(not_null<Window::SessionController*> controller);
+void ShowLeemenAccountDeletion(not_null<Window::SessionController*> controller);
 
 } // namespace Leemen

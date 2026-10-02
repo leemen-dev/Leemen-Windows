@@ -228,9 +228,13 @@ bool PrivateSpace::setPinTimeoutMinutes(int minutes) {
 	}
 	_pinTimeoutMinutes = minutes;
 	_pinWindow.setTimeout(std::chrono::minutes(minutes));
+	const auto weak = base::make_weak(_session.get());
 	save();
+	if (!weak || _damaged) {
+		return false;
+	}
 	_changes.fire({});
-	return true;
+	return bool(weak);
 }
 
 bool PrivateSpace::setScreenshotsAllowed(bool allowed) {
@@ -247,9 +251,13 @@ bool PrivateSpace::setScreenshotsAllowed(bool allowed) {
 		});
 	}
 	_allowScreenshots = allowed;
+	const auto weak = base::make_weak(_session.get());
 	save();
+	if (!weak || _damaged) {
+		return false;
+	}
 	_changes.fire({});
-	return true;
+	return bool(weak);
 }
 
 bool PrivateSpace::unlockWithinGrace() {
@@ -257,11 +265,12 @@ bool PrivateSpace::unlockWithinGrace() {
 		|| _pendingPinRequest || !_pinWindow.skippable()) {
 		return false;
 	}
+	const auto weak = base::make_weak(_session.get());
 	transition([&] {
 		_managementAuthorized = true;
 		_state.setActive(!requiresLimitResolution());
 	});
-	return true;
+	return weak && managementAllowed();
 }
 
 rpl::producer<> PrivateSpace::changes() const {
@@ -341,14 +350,17 @@ void PrivateSpace::finishPinCreation(
 	_pinWindow.clear();
 	_failedAttempts = 0;
 	_blockedUntil = 0;
+	const auto weak = base::make_weak(_session.get());
 	save();
-	if (_damaged) {
+	if (!weak || _damaged) {
 		done(false);
 		return;
 	}
 	_session->data().notifyUnreadBadgeChanged();
-	_changes.fire({});
-	done(true);
+	if (weak) {
+		_changes.fire({});
+	}
+	done(bool(weak));
 }
 
 void PrivateSpace::finishPinVerification(
@@ -377,12 +389,17 @@ void PrivateSpace::finishPinVerification(
 	}
 	_failedAttempts = 0;
 	_blockedUntil = 0;
+	const auto weak = base::make_weak(_session.get());
 	save();
-	if (_damaged) {
+	if (!weak || _damaged) {
 		done(false);
 		return;
 	}
 	if (_syncEnabled && syncImportLocal(request, done)) {
+		return;
+	}
+	if (!weak || _damaged) {
+		done(false);
 		return;
 	}
 	cancelPinOperation(request);
@@ -391,7 +408,7 @@ void PrivateSpace::finishPinVerification(
 		_managementAuthorized = true;
 		_state.setActive(!requiresLimitResolution());
 	});
-	done(true);
+	done(bool(weak));
 }
 
 void PrivateSpace::cancelPinOperation(std::uint64_t request) {
@@ -405,6 +422,7 @@ void PrivateSpace::cancelPinOperation(std::uint64_t request) {
 }
 
 void PrivateSpace::lock(bool clearVerification) {
+	const auto weak = base::make_weak(_session.get());
 	if (clearVerification) {
 		_pinWindow.clear();
 	}
@@ -415,7 +433,7 @@ void PrivateSpace::lock(bool clearVerification) {
 			_state.setActive(false);
 		});
 	}
-	if (_sync && _sync->maxMode() && !_syncApplying) {
+	if (weak && _sync && _sync->maxMode() && !_syncApplying) {
 		_sync->lockMax();
 	}
 }
@@ -428,10 +446,14 @@ bool PrivateSpace::setHidden(PeerId peer, bool hide) {
 	if (_syncEnabled) {
 		return syncSetHidden(peer, hide);
 	}
+	const auto weak = base::make_weak(_session.get());
 	transition([&] {
 		_state.setHidden(peer.value, hide);
 		if (!hide) {
 			forgetPrivateMessages(peer);
+			if (!weak || _damaged) {
+				return;
+			}
 			for (const auto related : affectedPeers(peer)) {
 				const auto loaded = _session->data().peerLoaded(peer);
 				if (loaded && ((loaded->migrateFrom()
@@ -440,12 +462,15 @@ bool PrivateSpace::setHidden(PeerId peer, bool hide) {
 						&& loaded->migrateTo()->id == related))) {
 					_state.setHidden(related.value, false);
 					forgetPrivateMessages(related);
+					if (!weak || _damaged) {
+						return;
+					}
 				}
 			}
 		}
 		save();
 	}, peer);
-	return !_damaged;
+	return weak && !_damaged;
 }
 
 bool PrivateSpace::disable() {
@@ -455,6 +480,7 @@ bool PrivateSpace::disable() {
 	if (_syncEnabled) {
 		return syncDisable();
 	}
+	const auto weak = base::make_weak(_session.get());
 	cancelPinOperation(_pendingPinRequest);
 	transition([&] {
 		_state = PrivateSpaceState();
@@ -468,7 +494,7 @@ bool PrivateSpace::disable() {
 		_blockedUntil = 0;
 		save();
 	});
-	return !_damaged;
+	return weak && !_damaged;
 }
 
 std::set<PeerId> PrivateSpace::affectedPeers(PeerId extra, bool allPeers) const {

@@ -629,6 +629,11 @@ std::optional<SecretBytes> EncodePromoRequest(std::string_view code) {
 	return EncodeRequest({ { "code", Text(std::string(code.substr(first, last - first))) } });
 }
 
+std::optional<SecretBytes> EncodeAccountDeleteRequest(std::string_view confirmation) {
+	if (confirmation != "DELETE") return std::nullopt;
+	return EncodeRequest({ { "confirm", Text("DELETE") } });
+}
+
 std::optional<SecretBytes> EncodeUpgradePrivacyRequest(
 		std::span<const unsigned char> wrappedPassword,
 		std::span<const unsigned char> passwordSalt,

@@ -68,20 +68,23 @@ bool PrivateSpace::enableSync() {
 		|| (configured() && !active())) {
 		return false;
 	}
+	const auto weak = base::make_weak(_session);
 	_syncDevice = QUuid::createUuid().toString(QUuid::WithoutBraces);
 	_syncEnabled = _syncTrusted = true;
 	transition([&] {
 		_syncTrusted = false;
 		_state.setActive(false);
 	});
+	if (!weak || _damaged) return false;
 	startSync();
-	return !_damaged;
+	return weak && !_damaged;
 }
 
 void PrivateSpace::startSync() {
 	if (_sync || _damaged) {
 		return;
 	}
+	const auto weak = base::make_weak(_session);
 	_sync = std::make_unique<SyncService>(_session);
 	const auto &saved = _session->settings().leemenSync();
 	if (!saved.isEmpty()) {
@@ -155,7 +158,7 @@ void PrivateSpace::startSync() {
 	}
 	_sync->changes() | rpl::on_next([=] { syncChanged(); }, _lifetime);
 	saveSync();
-	if (!_damaged) {
+	if (weak && !_damaged) {
 		_sync->start();
 	}
 }
@@ -192,6 +195,12 @@ void PrivateSpace::syncChanged() {
 	}
 	_syncApplying = true;
 	_syncChangePending = false;
+	const auto weak = base::make_weak(_session);
+	const auto canContinue = [&] {
+		if (!weak) return false;
+		if (_damaged) _syncApplying = false;
+		return !_damaged;
+	};
 	if (_sync->state() == SyncService::State::AccountDeleted
 		&& !_syncDeletedLogoutScheduled) {
 		_syncDeletedLogoutScheduled = true;
@@ -229,15 +238,22 @@ void PrivateSpace::syncChanged() {
 			_syncImportUnlockRequest = 0;
 			save();
 		});
-		if (_damaged) {
-			_syncApplying = false;
+		if (!canContinue()) {
 			if (done) {
 				done(false);
 			}
 			return;
 		}
 		_sync->completeLocalReset();
+		if (!canContinue()) {
+			if (done) done(false);
+			return;
+		}
 		saveSync();
+		if (!canContinue()) {
+			if (done) done(false);
+			return;
+		}
 		_syncApplying = false;
 		if (_syncChangePending) {
 			syncChanged();
@@ -253,6 +269,7 @@ void PrivateSpace::syncChanged() {
 		|| (_sync->state() == SyncService::State::Blocked
 			&& _sync->error() == SyncService::Error::None && !_sync->pendingMutation())) {
 		invalidatePrivateMessageIntents();
+		if (!canContinue()) return;
 	}
 	if (_sync->error() == SyncService::Error::AuthorizationChanged
 		|| _sync->error() == SyncService::Error::GenerationChanged
@@ -273,6 +290,7 @@ void PrivateSpace::syncChanged() {
 		|| ((reading || writing) && _syncTrusted && unchangedAccess);
 	if (active() && requiresLimitResolution()) {
 		transition([&] { _state.setActive(false); });
+		if (!canContinue()) return;
 	}
 	if (projected) {
 		auto hidden = std::set<std::int64_t>();
@@ -308,12 +326,15 @@ void PrivateSpace::syncChanged() {
 				_syncChangePending = true;
 				return;
 			}
-			for (const auto &[peer, stamp] : _syncLocalRemovals) {
+			const auto removals = _syncLocalRemovals;
+			for (const auto &[peer, stamp] : removals) {
 				const auto id = Sync::CanonicalPeerId(PeerId(peer));
 				if (id && Sync::IsConfirmedLocalRemoval(projected->filter, *id, stamp)) {
 					_state.setHidden(peer, false);
 					forgetPrivateMessages(PeerId(peer));
+					if (!canContinue()) return;
 					save();
+					if (!canContinue()) return;
 				}
 			}
 			_syncLocalRemovals.clear();
@@ -323,12 +344,14 @@ void PrivateSpace::syncChanged() {
 				_state.setActive(wasActive && !disabled);
 				_pin.reset();
 				save();
+				if (!canContinue()) return;
 			}
 			_syncDisableLocal.reset();
 			_syncProjection = *projected;
 			_syncHidden = std::move(hidden);
 			_syncTrusted = true;
 			reconcilePrivateMessages();
+			if (!canContinue()) return;
 			_pinTimeoutMinutes = minutes;
 			_pinWindow.setTimeout(std::chrono::minutes(minutes));
 			_allowScreenshots = screenshots ? screenshots->value : true;
@@ -346,6 +369,7 @@ void PrivateSpace::syncChanged() {
 			transition(apply);
 		} else {
 			apply();
+			if (!canContinue()) return;
 			_changes.fire({});
 		}
 	} else if (_syncTrusted != trusted) {
@@ -361,7 +385,9 @@ void PrivateSpace::syncChanged() {
 	} else {
 		_changes.fire({});
 	}
+	if (!canContinue()) return;
 	saveSync();
+	if (!canContinue()) return;
 	_syncApplying = false;
 	if (_syncChangePending) {
 		syncChanged();
@@ -385,8 +411,10 @@ bool PrivateSpace::syncMutate(
 	if (!clock) {
 		return false;
 	}
+	const auto weak = base::make_weak(_session);
 	change(pair.filter, pair.content, *clock);
-	return _sync->submit(std::move(pair.filter), std::move(pair.content));
+	return weak && !_damaged
+		&& _sync->submit(std::move(pair.filter), std::move(pair.content));
 }
 
 bool PrivateSpace::syncSetHidden(PeerId peer, bool hide) {
@@ -406,6 +434,7 @@ bool PrivateSpace::syncSetHidden(PeerId peer, bool hide) {
 		}
 	}
 	const auto previousRemovals = _syncLocalRemovals;
+	const auto weak = base::make_weak(_session);
 	const auto submitted = syncMutate([=](auto &filter, auto &content, std::int64_t clock) {
 		for (const auto peer : peers) {
 			if (const auto canonical = Sync::CanonicalPeerId(peer)) {
@@ -421,6 +450,7 @@ bool PrivateSpace::syncSetHidden(PeerId peer, bool hide) {
 			}
 		}
 	});
+	if (!weak || _damaged) return false;
 	if (!submitted) {
 		_syncLocalRemovals = previousRemovals;
 		saveSync();
@@ -430,6 +460,7 @@ bool PrivateSpace::syncSetHidden(PeerId peer, bool hide) {
 
 bool PrivateSpace::syncDisable() {
 	const auto previousDisable = _syncDisableLocal;
+	const auto weak = base::make_weak(_session);
 	const auto submitted = syncMutate([=](auto &filter, auto &content, std::int64_t clock) {
 		_syncDisableLocal = Sync::LocalIntentStamp{ clock, _syncDevice.toStdString() };
 		for (auto &[key, value] : filter.hiddenChatIds) {
@@ -449,6 +480,7 @@ bool PrivateSpace::syncDisable() {
 		}
 		content.pin = std::move(pin);
 	});
+	if (!weak || _damaged) return false;
 	if (!submitted) {
 		_syncDisableLocal = previousDisable;
 		saveSync();
@@ -468,6 +500,7 @@ bool PrivateSpace::syncImportLocal(std::uint64_t request, Fn<void(bool)> done) {
 		return true;
 	}
 	_syncImportUnlockRequest = request;
+	const auto weak = base::make_weak(_session);
 	_syncPinDone = crl::guard(_session, [=](bool synced) {
 		const auto valid = synced && _pendingPinRequest == request
 			&& _pinGeneration == request && HasPin(_syncProjection)
@@ -480,7 +513,7 @@ bool PrivateSpace::syncImportLocal(std::uint64_t request, Fn<void(bool)> done) {
 				_state.setActive(!requiresLimitResolution());
 			});
 		}
-		done(valid);
+		done(valid && weak && !_damaged);
 	});
 	const auto submitted = syncMutate([&](auto &filter, auto &, std::int64_t clock) {
 		for (const auto peer : _state.snapshot().hiddenPeers) {
@@ -492,6 +525,7 @@ bool PrivateSpace::syncImportLocal(std::uint64_t request, Fn<void(bool)> done) {
 			}
 		}
 	});
+	if (!weak || _damaged) return true;
 	if (!submitted) {
 		_syncPinDone = nullptr;
 		cancelPinOperation(request);
@@ -580,7 +614,7 @@ std::uint64_t PrivateSpace::syncSetPin(const QString &pin, Fn<void(bool)> done) 
 					}
 				}
 			});
-			if (!submitted && space._syncPinDone) {
+			if (weak && !submitted && space._syncPinDone) {
 				space._syncPinDone = nullptr;
 				done(false);
 			}

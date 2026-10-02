@@ -230,6 +230,9 @@ struct SyncService::Data {
 	void reconcileDowngrade();
 	void downgradeSucceeded(Sync::SecretKey key);
 	bool beginReset(Fn<void(bool)> done);
+	bool beginAccountDelete(Fn<void(bool)> done);
+	void postAccountDelete();
+	void finishAccountDelete(bool confirmed, Backend::Failure failure = {}, Error problem = Error::DeleteUncertain);
 	void postReset();
 	void finishReset(bool confirmed, Error problem);
 	void reconcilePrivacy();
@@ -301,6 +304,10 @@ struct SyncService::Data {
 	ResetState resetState = ResetState::None;
 	bool resetAuthorizing = false;
 	Fn<void(bool)> resetDone;
+	bool accountDeletePending = false;
+	bool accountDeleteAuthorizing = false;
+	Fn<void(bool)> accountDeleteDone;
+	Backend::Failure accountDeleteFailure;
 	Sync::SecretBytes token;
 	std::optional<Sync::SecretKey> masterKey;
 	std::optional<std::string> masterFingerprint;
@@ -387,6 +394,10 @@ void SyncService::Data::cancel() {
 	remoteRefresh.stop();
 	realtime->stop();
 	resetAuthorizing = false;
+	accountDeleteAuthorizing = false;
+	if (auto done = std::exchange(accountDeleteDone, nullptr)) {
+		crl::on_main([done = std::move(done)] { done(false); });
+	}
 	if (auto done = std::exchange(resetDone, nullptr)) {
 		crl::on_main([done = std::move(done)] { done(false); });
 	}
@@ -410,8 +421,10 @@ void SyncService::Data::cancel() {
 bool SyncService::Data::publish(State next, Error problem) {
 	state = next;
 	error = problem;
-	if (enabled && !token.bytes().empty() && resetState == ResetState::None
-		&& (state == State::NeedsPassphrase || state == State::NeedsConsent || state == State::Ready)) {
+	if (enabled && !token.bytes().empty() && state != State::AccountDeleted
+		&& ((accountDeletePending && !accountDeleteDone)
+			|| (resetState == ResetState::None && (state == State::NeedsPassphrase
+				|| state == State::NeedsConsent || state == State::Ready)))) {
 		if (!poll.isActive()) poll.start();
 	}
 	scheduleRemoteRefresh();
@@ -429,6 +442,14 @@ void SyncService::Data::keepPendingAndClose() {
 }
 
 void SyncService::Data::block(Error problem, bool deleted) {
+	if (accountDeletePending) {
+		finishAccountDelete(deleted,
+			{ problem == Error::Transport ? Backend::FailureKind::Retryable
+				: deleted ? Backend::FailureKind::AccountDeleted : Backend::FailureKind::Rejected,
+				0, {}, {}, {} },
+			problem == Error::GenerationChanged ? problem : Error::DeleteUncertain);
+		return;
+	}
 	cancel();
 	bootstrap.reset();
 	keepPendingAndClose();
@@ -451,7 +472,7 @@ void SyncService::Data::block(Error problem, bool deleted) {
 }
 
 void SyncService::Data::retryTransport() {
-	if (!enabled || !transportRetryPending
+	if (accountDeletePending || !enabled || !transportRetryPending
 		|| state != State::Blocked || error != Error::Transport
 		|| QGuiApplication::applicationState() != Qt::ApplicationActive
 		|| (maximumMode && !canUnlockMaximum())) {
@@ -469,6 +490,20 @@ void SyncService::Data::retryTransport() {
 }
 
 void SyncService::Data::failure(const Backend::Failure &failure) {
+	if (accountDeletePending) {
+		if (failure.kind == Backend::FailureKind::Unauthorized && !accountDeleteDone
+			&& generation && !renewalRetried) {
+			renewalRetried = true;
+			cancel();
+			token.clear();
+			keepPendingAndClose();
+			authorize();
+		} else {
+			finishAccountDelete(failure.kind == Backend::FailureKind::AccountDeleted, failure,
+				failure.kind == Backend::FailureKind::GenerationChanged ? Error::GenerationChanged : Error::DeleteUncertain);
+		}
+		return;
+	}
 	switch (failure.kind) {
 	case Backend::FailureKind::AccountDeleted:
 		block(Error::Authorization, true);
@@ -506,6 +541,13 @@ void SyncService::Data::http(
 		HttpDone done,
 		bool authorized,
 		Fn<void(Error)> failed) {
+	if (accountDeletePending && !((method == "POST" && path == u"auth/telegram"_q)
+		|| (method == "GET" && path == u"session/status"_q)
+		|| (method == "POST" && path == u"account/delete"_q && accountDeleteDone))) {
+		if (failed) failed(Error::DeleteUncertain);
+		else block(Error::DeleteUncertain);
+		return;
+	}
 	if (!enabled || (authorized && token.bytes().empty())) {
 		if (failed) {
 			failed(Error::Authorization);
@@ -661,6 +703,10 @@ void SyncService::Data::requestInitData(not_null<UserData*> bot) {
 }
 
 void SyncService::Data::postAuth(Sync::SecretBytes initData) {
+	if (accountDeletePending && !generation) {
+		block(Error::GenerationChanged);
+		return;
+	}
 	auto body = Backend::EncodeAuthRequest(View(initData), generation);
 	if (!body) {
 		block(Error::InvalidData);
@@ -669,6 +715,11 @@ void SyncService::Data::postAuth(Sync::SecretBytes initData) {
 	http("POST", u"auth/telegram"_q, std::move(body), [=, this](int status, const QByteArray &bytes) {
 		auto result = Backend::ParseAuth(status, View(bytes));
 		if (!result.value) {
+			if (accountDeletePending) {
+				finishAccountDelete(result.failure.kind == Backend::FailureKind::AccountDeleted, result.failure,
+					result.failure.kind == Backend::FailureKind::GenerationChanged ? Error::GenerationChanged : Error::DeleteUncertain);
+				return;
+			}
 			if (!authRetried && (result.failure.kind == Backend::FailureKind::InitDataInvalid
 				|| result.failure.kind == Backend::FailureKind::InitDataReplayed)) {
 				authRetried = true;
@@ -687,6 +738,15 @@ void SyncService::Data::postAuth(Sync::SecretBytes initData) {
 		token = std::move(auth.token);
 		maximumMode = auth.privacyMode == Backend::PrivacyMode::Maximum;
 		bootstrap = std::move(auth.bootstrap);
+		if (accountDeletePending) {
+			bootstrap.reset();
+			if (accountDeleteAuthorizing && accountDeleteDone) {
+				postAccountDelete();
+			} else if (publish(State::Blocked, Error::DeleteUncertain)) {
+				checkSession();
+			}
+			return;
+		}
 		if (resetState != ResetState::None) {
 			bootstrap.reset();
 			if (resetAuthorizing) {
@@ -706,7 +766,7 @@ void SyncService::Data::postAuth(Sync::SecretBytes initData) {
 }
 
 void SyncService::Data::fetchKey() {
-	if (consentStatus != ConsentStatus::Accepted || awaitingConsent) {
+	if (accountDeletePending || consentStatus != ConsentStatus::Accepted || awaitingConsent) {
 		return;
 	}
 	if (!publish(State::FetchingKey)) {
@@ -724,7 +784,7 @@ void SyncService::Data::fetchKey() {
 
 void SyncService::Data::checkSession(bool ensureFresh) {
 	if (!enabled || token.bytes().empty() || !generation
-		|| resetState != ResetState::None || state == State::AccountDeleted
+		|| (resetState != ResetState::None && !accountDeletePending) || state == State::AccountDeleted
 		|| error == Error::GenerationChanged || error == Error::AuthorizationChanged
 		|| session->account().maybeSession() != session
 		|| QGuiApplication::applicationState() != Qt::ApplicationActive) {
@@ -745,6 +805,7 @@ void SyncService::Data::checkSession(bool ensureFresh) {
 					block(Error::GenerationChanged);
 					return;
 				}
+				if (accountDeletePending && !publish(State::Blocked, Error::DeleteUncertain)) return;
 			} else if (result.failure.kind == Backend::FailureKind::AccountDeleted
 				|| result.failure.kind == Backend::FailureKind::Unauthorized
 				|| result.failure.kind == Backend::FailureKind::GenerationChanged) {
@@ -759,7 +820,7 @@ void SyncService::Data::checkSession(bool ensureFresh) {
 }
 
 void SyncService::Data::updateRealtime() {
-	if (!enabled || !generation || token.bytes().empty()
+	if (accountDeletePending || !enabled || !generation || token.bytes().empty()
 		|| resetState != ResetState::None || consentStatus != ConsentStatus::Accepted
 		|| awaitingConsent || state == State::AccountDeleted
 		|| error == Error::GenerationChanged || error == Error::AuthorizationChanged
@@ -774,7 +835,7 @@ void SyncService::Data::updateRealtime() {
 }
 
 void SyncService::Data::scheduleRemoteRefresh() {
-	if (!remoteChangePending || !enabled || token.bytes().empty()
+	if (accountDeletePending || !remoteChangePending || !enabled || token.bytes().empty()
 		|| resetState != ResetState::None || privacyOperation != PrivacyOperation::Idle
 		|| promoDone || consentDone || metadataStatus == MetadataStatus::Loading
 		|| error == Error::GenerationChanged || error == Error::AuthorizationChanged
@@ -786,7 +847,7 @@ void SyncService::Data::scheduleRemoteRefresh() {
 }
 
 void SyncService::Data::flushRemoteRefresh() {
-	if (!remoteChangePending || !enabled || token.bytes().empty()
+	if (accountDeletePending || !remoteChangePending || !enabled || token.bytes().empty()
 		|| resetState != ResetState::None || privacyOperation != PrivacyOperation::Idle
 		|| promoDone || consentDone || metadataStatus == MetadataStatus::Loading
 		|| error == Error::GenerationChanged || error == Error::AuthorizationChanged
@@ -807,7 +868,7 @@ void SyncService::Data::finishPromo(bool success, Backend::Failure problem) {
 }
 
 bool SyncService::Data::redeemPromo(const QString &code, Fn<void(bool)> done) {
-	if (!done || !canUnlockMaximum() || token.bytes().empty() || !generation
+	if (accountDeletePending || !done || !canUnlockMaximum() || token.bytes().empty() || !generation
 		|| resetState != ResetState::None || privacyOperation != PrivacyOperation::Idle
 		|| consentStatus != ConsentStatus::Accepted || awaitingConsent || promoDone
 		|| (state != State::Ready && state != State::NeedsPassphrase) || code.size() > 4096) {
@@ -851,6 +912,7 @@ bool SyncService::Data::redeemPromo(const QString &code, Fn<void(bool)> done) {
 }
 
 bool SyncService::Data::fetchMe() {
+	if (accountDeletePending) return false;
 	if (metadataStatus == MetadataStatus::Loading
 		|| privacyOperation != PrivacyOperation::Idle
 		|| !consentWrites.empty() || promoDone) {
@@ -956,7 +1018,7 @@ void SyncService::Data::failMe(Error problem) {
 }
 
 bool SyncService::Data::acceptTerms(const QString &locale, Fn<void(bool)> done) {
-	if (!done || !enabled || token.bytes().empty() || !awaitingConsent
+	if (accountDeletePending || !done || !enabled || token.bytes().empty() || !awaitingConsent
 		|| consentStatus != ConsentStatus::Required || metadataStatus != MetadataStatus::Ready
 		|| !metadata || consentDone || state != State::NeedsConsent
 		|| resetState != ResetState::None || !canUnlockMaximum()
@@ -1062,7 +1124,7 @@ void SyncService::Data::clearPrivacy() {
 }
 
 bool SyncService::Data::canPreparePrivacy(bool maximum) const {
-	return canUnlockMaximum() && state == State::Ready && masterKey && !promoDone
+	return !accountDeletePending && canUnlockMaximum() && state == State::Ready && masterKey && !promoDone
 		&& resetState == ResetState::None
 		&& !token.bytes().empty() && !coordinator.pendingMutation()
 		&& privacyOperation == PrivacyOperation::Idle
@@ -1397,7 +1459,7 @@ void SyncService::Data::downgradeSucceeded(Sync::SecretKey key) {
 }
 
 bool SyncService::Data::beginReset(Fn<void(bool)> done) {
-	if (!done || !generation || !canUnlockMaximum()
+	if (accountDeletePending || !done || !generation || !canUnlockMaximum()
 		|| resetState == ResetState::Confirmed || resetDone
 		|| privacyOperation != PrivacyOperation::Idle
 		|| state == State::Authorizing || state == State::FetchingKey
@@ -1419,6 +1481,93 @@ bool SyncService::Data::beginReset(Fn<void(bool)> done) {
 	}
 	authorize();
 	return true;
+}
+
+bool SyncService::Data::beginAccountDelete(Fn<void(bool)> done) {
+	if (!done || !generation || !canUnlockMaximum() || accountDeleteDone
+		|| state == State::AccountDeleted || resetState == ResetState::Confirmed || resetDone
+		|| privacyOperation != PrivacyOperation::Idle
+		|| state == State::Authorizing || state == State::FetchingKey
+		|| state == State::Reading || state == State::Writing) {
+		return false;
+	}
+	cancel();
+	keepPendingAndClose();
+	token.clear();
+	masterKey.reset();
+	maximumKey.reset();
+	bootstrap.reset();
+	premiumTimer.stop();
+	premiumClock.clear();
+	metadata.reset();
+	metadataReceivedAt.reset();
+	metadataStatus = MetadataStatus::Unknown;
+	consentStatus = ConsentStatus::Unknown;
+	awaitingConsent = false;
+	accountDeletePending = true;
+	accountDeleteAuthorizing = true;
+	accountDeleteDone = std::move(done);
+	accountDeleteFailure = {};
+	authRetried = renewalRetried = false;
+	if (publish(State::Blocked, Error::DeleteUncertain)) {
+		authorize();
+	}
+	return true;
+}
+
+void SyncService::Data::postAccountDelete() {
+	accountDeleteAuthorizing = false;
+	if (!accountDeletePending || !accountDeleteDone || !generation || !canUnlockMaximum()) {
+		finishAccountDelete(false);
+		return;
+	}
+	auto body = Backend::EncodeAccountDeleteRequest("DELETE");
+	if (!body) {
+		finishAccountDelete(false);
+		return;
+	}
+	if (!publish(State::Blocked, Error::DeleteUncertain)) {
+		return;
+	}
+	http("POST", u"account/delete"_q, std::move(body),
+		[=, this](int status, const QByteArray &bytes) {
+			const auto result = Backend::ParseOk(status, View(bytes));
+			finishAccountDelete((result.value && *result.value)
+				|| result.failure.kind == Backend::FailureKind::AccountDeleted, result.failure);
+		}, true, [=, this](Error) {
+			finishAccountDelete(false,
+				{ Backend::FailureKind::Retryable, 0, "transport", {}, {} });
+		});
+}
+
+void SyncService::Data::finishAccountDelete(
+		bool confirmed,
+		Backend::Failure failure,
+		Error problem) {
+	const auto done = std::exchange(accountDeleteDone, nullptr);
+	cancel();
+	keepPendingAndClose();
+	masterKey.reset();
+	maximumKey.reset();
+	bootstrap.reset();
+	premiumTimer.stop();
+	premiumClock.clear();
+	metadata.reset();
+	metadataReceivedAt.reset();
+	metadataStatus = MetadataStatus::Unknown;
+	consentStatus = ConsentStatus::Unknown;
+	awaitingConsent = false;
+	accountDeletePending = true;
+	accountDeleteFailure = std::move(failure);
+	if (confirmed || problem == Error::GenerationChanged
+		|| accountDeleteFailure.kind == Backend::FailureKind::Unauthorized) {
+		token.clear();
+	}
+	if (done) {
+		crl::on_main([done, confirmed] { done(confirmed); });
+	}
+	publish(confirmed ? State::AccountDeleted : State::Blocked,
+		confirmed ? Error::Authorization : problem);
 }
 
 void SyncService::Data::postReset() {
@@ -1456,7 +1605,7 @@ void SyncService::Data::finishReset(bool confirmed, Error problem) {
 }
 
 void SyncService::Data::acceptKey(Backend::AccountKey key) {
-	if (consentStatus != ConsentStatus::Accepted || awaitingConsent) {
+	if (accountDeletePending || consentStatus != ConsentStatus::Accepted || awaitingConsent) {
 		return;
 	}
 	if (auto ready = std::get_if<Backend::DefaultKey>(&key)) {
@@ -1565,7 +1714,7 @@ void SyncService::Data::deriveMaximum(
 }
 
 void SyncService::Data::wrapDefault() {
-	if (consentStatus != ConsentStatus::Accepted || awaitingConsent) {
+	if (accountDeletePending || consentStatus != ConsentStatus::Accepted || awaitingConsent) {
 		return;
 	}
 	if (masterFingerprint || resetState != ResetState::None) {
@@ -1603,7 +1752,7 @@ void SyncService::Data::wrapDefault() {
 }
 
 void SyncService::Data::pull() {
-	if (consentStatus != ConsentStatus::Accepted || awaitingConsent) {
+	if (accountDeletePending || consentStatus != ConsentStatus::Accepted || awaitingConsent) {
 		return;
 	}
 	if (resetState != ResetState::None) {
@@ -1789,7 +1938,7 @@ QByteArray SyncService::Data::serialize() const {
 	}
 	const auto result = Sync::EncodeSessionSnapshot(Sync::SessionSnapshot{
 		session->userId().bare, *generation, maximumMode, masterFingerprint,
-		resetState, coordinator.checkpoint() });
+		resetState, coordinator.checkpoint(), accountDeletePending });
 	return result ? QByteArray(result->data(), result->size()) : QByteArray();
 }
 
@@ -1807,6 +1956,7 @@ bool SyncService::Data::restore(const QByteArray &serialized) {
 	generation = std::move(snapshot->generation);
 	masterFingerprint = std::move(snapshot->keyFingerprint);
 	resetState = snapshot->reset;
+	accountDeletePending = snapshot->accountDeletePending;
 	maximumMode = snapshot->maximum;
 	return true;
 }
@@ -1822,6 +1972,22 @@ SyncService::~SyncService() {
 
 void SyncService::start() {
 	if (_data->state == State::AccountDeleted) {
+		return;
+	}
+	if (_data->accountDeletePending) {
+		if (_data->accountDeleteDone || _data->state == State::Authorizing) return;
+		_data->enabled = true;
+		if (!_data->canUnlockMaximum()) return;
+		if (_data->token.bytes().empty()) {
+			_data->cancel();
+			_data->keepPendingAndClose();
+			_data->authRetried = _data->renewalRetried = false;
+			if (_data->publish(State::Blocked, Error::DeleteUncertain)) {
+				_data->authorize();
+			}
+		} else if (_data->publish(State::Blocked, Error::DeleteUncertain)) {
+			_data->checkSession(true);
+		}
 		return;
 	}
 	if (_data->resetState != ResetState::None) {
@@ -1850,6 +2016,13 @@ void SyncService::start() {
 }
 
 void SyncService::refresh() {
+	if (_data->accountDeletePending) {
+		if (!_data->enabled || _data->accountDeleteDone || _data->state == State::Authorizing
+			|| _data->state == State::AccountDeleted || _data->error == Error::GenerationChanged) return;
+		if (_data->token.bytes().empty()) start();
+		else _data->checkSession(true);
+		return;
+	}
 	if (!_data->enabled || _data->token.bytes().empty()
 		|| _data->resetState != ResetState::None || _data->state == State::AccountDeleted) {
 		return;
@@ -1890,7 +2063,7 @@ void SyncService::refresh() {
 }
 
 bool SyncService::refreshAccountMetadata() {
-	if (!_data->canUnlockMaximum() || _data->token.bytes().empty()
+	if (_data->accountDeletePending || !_data->canUnlockMaximum() || _data->token.bytes().empty()
 		|| _data->resetState != ResetState::None || _data->promoDone || _data->consentDone
 		|| _data->privacyOperation != PrivacyOperation::Idle
 		|| _data->state == State::AccountDeleted
@@ -1904,7 +2077,7 @@ bool SyncService::refreshAccountMetadata() {
 }
 
 void SyncService::notifyRemoteChanged() {
-	if (!_data->enabled || _data->state == State::AccountDeleted) return;
+	if (_data->accountDeletePending || !_data->enabled || _data->state == State::AccountDeleted) return;
 	_data->remoteChangePending = true;
 	_data->scheduleRemoteRefresh();
 }
@@ -1929,6 +2102,12 @@ void SyncService::stop() {
 }
 
 void SyncService::lockMax() {
+	if (_data->state == State::AccountDeleted) return;
+	if (_data->accountDeletePending) {
+		_data->finishAccountDelete(false, _data->accountDeleteFailure,
+			_data->error == Error::GenerationChanged ? Error::GenerationChanged : Error::DeleteUncertain);
+		return;
+	}
 	if (_data->resetDone) {
 		_data->finishReset(false, Error::ResetUncertain);
 		return;
@@ -1982,7 +2161,7 @@ void SyncService::lockMax() {
 }
 
 void SyncService::unlockMax(const QString &passphrase, bool recovery) {
-	if (!_data->canUnlockMaximum()
+	if (_data->accountDeletePending || !_data->canUnlockMaximum()
 		|| _data->consentStatus != ConsentStatus::Accepted || _data->awaitingConsent
 		|| _data->resetState != ResetState::None
 		|| _data->state != State::NeedsPassphrase || !_data->maximumKey) {
@@ -2038,6 +2217,23 @@ const Sync::Backend::Failure &SyncService::promoFailure() const {
 	return _data->promoFailure;
 }
 
+bool SyncService::deleteLeemenAccount(const QString &confirmation, Fn<void(bool)> done) {
+	return confirmation == u"DELETE"_q && _data->beginAccountDelete(std::move(done));
+}
+
+bool SyncService::accountDeletionPending() const {
+	return _data->accountDeletePending;
+}
+
+bool SyncService::deletingAccount() const {
+	return bool(_data->accountDeleteDone)
+		|| (_data->accountDeletePending && _data->state == State::Authorizing);
+}
+
+const Sync::Backend::Failure &SyncService::accountDeletionFailure() const {
+	return _data->accountDeleteFailure;
+}
+
 bool SyncService::commitMaximum(
 		std::uint64_t id,
 		bool recoverySaved,
@@ -2064,7 +2260,7 @@ bool SyncService::resetPrivateSpace(const QString &confirmation, Fn<void(bool)> 
 }
 
 bool SyncService::completeLocalReset() {
-	if (_data->resetState != ResetState::Confirmed) {
+	if (_data->accountDeletePending || _data->resetState != ResetState::Confirmed) {
 		return false;
 	}
 	_data->cancel();
@@ -2119,7 +2315,7 @@ bool SyncService::privacyOperationBusy() const {
 }
 
 bool SyncService::submit(Sync::FilterBlob filter, Sync::ContentBlob content) {
-	if (_data->state != State::Ready || !_data->masterKey
+	if (_data->accountDeletePending || _data->state != State::Ready || !_data->masterKey
 		|| _data->promoDone
 		|| _data->consentStatus != ConsentStatus::Accepted || _data->awaitingConsent
 		|| _data->resetState != ResetState::None
@@ -2135,6 +2331,7 @@ bool SyncService::submit(Sync::FilterBlob filter, Sync::ContentBlob content) {
 }
 
 void SyncService::discardPendingMutation() {
+	if (_data->accountDeletePending) return;
 	_data->cancel();
 	_data->coordinator.discardPendingMutation();
 	_data->publish(State::Blocked);
@@ -2173,7 +2370,7 @@ Security::PremiumSnapshot SyncService::premium() const {
 }
 
 const Sync::SyncPair *SyncService::projection() const {
-	return (_data->state == State::Ready && _data->resetState == ResetState::None
+	return (!_data->accountDeletePending && _data->state == State::Ready && _data->resetState == ResetState::None
 		&& _data->consentStatus == ConsentStatus::Accepted && !_data->awaitingConsent)
 		? _data->coordinator.projection() : nullptr;
 }

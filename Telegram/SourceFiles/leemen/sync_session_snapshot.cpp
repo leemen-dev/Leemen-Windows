@@ -44,6 +44,7 @@ bool Valid(const SessionSnapshot &snapshot) {
 		&& (snapshot.reset == LocalResetState::None
 			|| snapshot.reset == LocalResetState::Pending
 			|| snapshot.reset == LocalResetState::Confirmed)
+		&& (!snapshot.accountDeletePending || snapshot.reset != LocalResetState::Confirmed)
 		&& coordinator.restoreCheckpoint(snapshot.checkpoint);
 }
 
@@ -71,6 +72,9 @@ std::optional<std::string> EncodeSessionSnapshot(const SessionSnapshot &snapshot
 	if (snapshot.reset != LocalResetState::None) {
 		object.emplace("reset", JsonValue{ std::string(
 			snapshot.reset == LocalResetState::Confirmed ? "confirmed" : "pending") });
+	}
+	if (snapshot.accountDeletePending) {
+		object.emplace("account_delete", JsonValue{ std::string("pending") });
 	}
 	if (checkpoint.pending) {
 		const auto filter = EncodeFilterBlob(checkpoint.pending->filter);
@@ -108,11 +112,13 @@ std::optional<SessionSnapshot> ReadSessionSnapshot(
 	const auto maximum = mode ? std::get_if<bool>(&mode->value) : nullptr;
 	const auto fingerprint = StringField(value, "key_fingerprint");
 	const auto reset = StringField(value, "reset");
+	const auto deletion = StringField(value, "account_delete");
 	if (!version || ExactInt64(*version) != 1
 		|| !telegram || *telegram != std::to_string(expectedTelegramUserId)
 		|| !master || !Backend::CanonicalUuid(*master)
 		|| !sync || !Backend::CanonicalUuid(*sync) || !maximum
 		|| (Field(value, "key_fingerprint") && !fingerprint)
+		|| (Field(value, "account_delete") && (!deletion || *deletion != "pending"))
 		|| (Field(value, "reset") && (!reset || (*reset != "pending" && *reset != "confirmed")))) {
 		return std::nullopt;
 	}
@@ -120,6 +126,7 @@ std::optional<SessionSnapshot> ReadSessionSnapshot(
 		{ *Backend::CanonicalUuid(*master), *Backend::CanonicalUuid(*sync) },
 		*maximum, fingerprint, !reset ? LocalResetState::None
 			: (*reset == "confirmed") ? LocalResetState::Confirmed : LocalResetState::Pending, {} };
+	result.accountDeletePending = deletion.has_value();
 	const auto filterFloor = Field(value, "filter_version_floor");
 	const auto contentFloor = Field(value, "content_version_floor");
 	if (filterFloor || contentFloor) {

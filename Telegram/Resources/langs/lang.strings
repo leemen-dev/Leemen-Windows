@@ -8882,6 +8882,14 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 "lng_leemen_account_unavailable" = "Account information is unavailable. Try refreshing.";
 "lng_leemen_account_refresh" = "Refresh account information";
 "lng_leemen_account_delete_link" = "Delete Leemen account…";
+"lng_leemen_account_delete_title" = "Delete Leemen account";
+"lng_leemen_account_delete_about" = "This permanently deletes your Leemen cloud account, synchronized Private Space data and linked account data. This account will be signed out on this device once the server confirms deletion. Other Leemen sessions lose access to this Leemen account. Your Telegram account and Telegram messages are not deleted. This cannot be undone.";
+"lng_leemen_account_delete_type" = "Type DELETE to confirm";
+"lng_leemen_account_delete_sending" = "Deleting Leemen account…";
+"lng_leemen_account_delete_pending" = "The server has not confirmed deletion. Access to Private Space stays blocked while the result is uncertain. To make another deletion request, type DELETE again and press Delete Leemen account.";
+"lng_leemen_account_delete_rate_limited" = "Too many attempts. Wait before trying again.";
+"lng_leemen_account_delete_rejected" = "The deletion request could not be started. Check the connection and try again. Each attempt requires typing DELETE again.";
+"lng_leemen_account_delete_info" = "About deleting your Leemen account";
 "lng_leemen_promo_code" = "Promo code";
 "lng_leemen_promo_redeem" = "Apply code";
 "lng_leemen_promo_redeeming" = "Applying code…";
@@ -8938,3 +8946,15 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 
 "lng_leemen_intro_about" = "Telegram messaging with Leemen Private Space.";
 "lng_leemen_about_text" = "Leemen Desktop is an independent client based on Telegram Desktop, using the {api_link}. It adds Private Space and Leemen synchronization.";
+
+"lng_leemen_privacy_check" = "Privacy check";
+"lng_leemen_privacy_check_about" = "Hiding chats applies in Leemen. Other Telegram clients may still show those chats. These checks help you review access to your Telegram account.";
+"lng_leemen_privacy_check_loading" = "Checking Telegram account settings…";
+"lng_leemen_privacy_check_unavailable" = "This check could not be completed. Check your connection and try again.";
+"lng_leemen_privacy_check_password_warning" = "Telegram two-step verification is not enabled. Set a cloud password to help protect your account from new logins.";
+"lng_leemen_privacy_check_password_ok" = "Telegram two-step verification is enabled.";
+"lng_leemen_privacy_check_password" = "Manage Telegram two-step verification";
+"lng_leemen_privacy_check_sessions_warning" = "Other Telegram apps have active sessions. Your hidden chats may be visible in those apps.";
+"lng_leemen_privacy_check_sessions_ok" = "No active session from another Telegram app was found.";
+"lng_leemen_privacy_check_sessions" = "Manage Telegram sessions";
+"lng_leemen_privacy_check_refresh" = "Check again";

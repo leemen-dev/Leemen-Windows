@@ -92,6 +92,64 @@ void RoundTrips() {
 		"lost-secret reset can quarantine an account before any master key was obtained");
 }
 
+void AccountDeletionQuarantine() {
+	for (const auto maximum : { false, true }) {
+		for (const auto dirty : { false, true }) {
+			for (const auto reset : { LocalResetState::None, LocalResetState::Pending }) {
+				auto original = Sample(dirty);
+				original.maximum = maximum;
+				original.reset = reset;
+				original.accountDeletePending = true;
+				const auto serialized = Encode(original);
+				const auto restored = ReadSessionSnapshot(serialized, original.telegramUserId);
+				Check(restored && restored->accountDeletePending, "pending account deletion survives process restart");
+				Check(restored->reset == reset && restored->maximum == maximum,
+					"whole-account quarantine preserves preceding reset and privacy mode");
+				Check(restored->generation == original.generation && restored->keyFingerprint == original.keyFingerprint,
+					"pending deletion remains bound to the old generation and key");
+				Check(restored->checkpoint.filterVersionFloor == original.checkpoint.filterVersionFloor
+					&& restored->checkpoint.contentVersionFloor == original.checkpoint.contentVersionFloor,
+					"deletion quarantine preserves acknowledged version floors");
+				auto coordinator = SyncCoordinator();
+				Check(coordinator.restoreCheckpoint(restored->checkpoint), "quarantined checkpoint remains restorable");
+				Check(!coordinator.projection() && bool(coordinator.pendingMutation()) == dirty,
+					"restart stays closed and retains unacknowledged private mutations");
+				if (dirty) {
+					Check(coordinator.pendingMutation()->filter == original.checkpoint.pending->filter
+						&& coordinator.pendingMutation()->content == original.checkpoint.pending->content,
+						"whole-account deletion never silently discards pending data before acknowledgement");
+				}
+				Check(!ReadSessionSnapshot(serialized, original.telegramUserId + 1),
+					"deletion marker cannot be transferred to another Telegram account");
+			}
+		}
+	}
+	auto noSecret = Sample();
+	noSecret.keyFingerprint.reset();
+	noSecret.accountDeletePending = true;
+	Check(ReadSessionSnapshot(Encode(noSecret), noSecret.telegramUserId)->accountDeletePending,
+		"forgotten-secret deletion can be quarantined before obtaining the master key");
+	const auto legacy = ReadSessionSnapshot(Encode(Sample()), Sample().telegramUserId);
+	Check(legacy && !legacy->accountDeletePending, "legacy marker absence does not invent a deletion intent");
+	for (const auto &invalid : std::vector<JsonValue>{ JsonValue{ nullptr }, JsonValue{ true },
+		JsonValue{ false }, JsonValue{ JsonNumber{ "1" } }, JsonValue{ std::string() },
+		JsonValue{ std::string("confirmed") }, JsonValue{ std::string("none") },
+		JsonValue{ std::string("Pending") }, JsonValue{ std::string("pending ") } }) {
+		auto value = Fixture();
+		std::get<Object>(value.value)["account_delete"] = invalid;
+		Check(!Readable(value), "invalid account deletion marker fails closed instead of releasing quarantine");
+	}
+	auto duplicate = Encode(noSecret);
+	duplicate.insert(1, "\"account_delete\":\"pending\",");
+	Check(!ReadSessionSnapshot(duplicate, noSecret.telegramUserId), "duplicate deletion marker is rejected");
+	noSecret.reset = LocalResetState::Confirmed;
+	Check(!EncodeSessionSnapshot(noSecret), "conflicting confirmed reset cannot release pending whole-account deletion");
+	auto conflict = Fixture();
+	std::get<Object>(conflict.value)["account_delete"] = JsonValue{ std::string("pending") };
+	std::get<Object>(conflict.value)["reset"] = JsonValue{ std::string("confirmed") };
+	Check(!Readable(conflict), "reader rejects contradictory destructive-operation acknowledgements");
+}
+
 void InvalidRecords() {
 	const auto badReset = std::vector<JsonValue>{
 		JsonValue{ nullptr }, JsonValue{ true }, JsonValue{ std::string("none") },
@@ -230,6 +288,7 @@ void CommittedFloors() {
 
 int main() {
 	RoundTrips();
+	AccountDeletionQuarantine();
 	InvalidRecords();
 	ConfirmedCleanup();
 	CommittedFloors();

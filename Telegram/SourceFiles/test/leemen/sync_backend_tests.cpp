@@ -417,6 +417,37 @@ void TestRequiredConsent() {
 	}
 }
 
+void TestAccountDeletion() {
+	const auto request = Request(EncodeAccountDeleteRequest("DELETE"));
+	Check(Fields(request).size() == 1, "account deletion contains only explicit confirmation");
+	Check(std::get<std::string>(Fields(request).at("confirm").value) == "DELETE",
+		"account deletion exact backend confirmation");
+	for (const auto confirmation : { "", "delete", "Delete", " DELETE", "DELETE ",
+		"DELETE\n", "DELETED", "RESET", "\xef\xbb\xbf" "DELETE" }) {
+		Check(!EncodeAccountDeleteRequest(confirmation), "account deletion does not normalize or infer typed consent");
+	}
+	Check(!EncodeAccountDeleteRequest(std::string("DELETE\0", 7)), "embedded null cannot truncate delete consent");
+	Check(!EncodeAccountDeleteRequest(std::string(4097, 'D')), "oversized delete confirmation rejected");
+	Check(ParseOk(200, R"({"ok":true,"deleted_master":true})").value == true,
+		"explicit acknowledged account deletion is accepted with backend metadata");
+	for (const auto body : { R"({"ok":false})", R"({"ok":"true"})", R"({})",
+		R"({"ok":true,"ok":false})", "", R"({"error":{"code":"auth_account_deleted"}})" }) {
+		Check(!ParseOk(200, body).value, "missing malformed or negative deletion acknowledgement never succeeds");
+	}
+	Check(ParseOk(401, R"({"error":{"code":"auth_account_deleted"}})").failure.kind == FailureKind::AccountDeleted,
+		"an exact authenticated deleted-generation response confirms deletion");
+	for (const auto status : { 0, 400, 404, 409, 429, 500, 503 }) {
+		const auto result = ParseOk(status, R"({"error":{"code":"auth_account_deleted"}})");
+		Check(!result.value && result.failure.kind != FailureKind::AccountDeleted,
+			"outages missing endpoints and unauthenticated hints do not confirm deletion");
+	}
+	for (const auto code : { "auth_invalid", "account_deleted", "deleted_account", "not_found" }) {
+		const auto result = ParseOk(401, std::string("{\"error\":{\"code\":\"") + code + "\"}}");
+		Check(!result.value && result.failure.kind != FailureKind::AccountDeleted,
+			"legacy deletion aliases never authorize local logout");
+	}
+}
+
 void TestPromoAndSessionGuard() {
 	const auto requestCode = [](std::string_view input) {
 		const auto request = Request(EncodePromoRequest(input));
@@ -501,6 +532,7 @@ int main() {
 	TestRequests();
 	TestMaximumPrivacy();
 	TestRequiredConsent();
+	TestAccountDeletion();
 	TestPromoAndSessionGuard();
 	std::cout << "Sync backend checks passed: " << Checks << '\n';
 }

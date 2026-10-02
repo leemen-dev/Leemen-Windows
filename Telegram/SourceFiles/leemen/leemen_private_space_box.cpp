@@ -9,6 +9,7 @@
 #include "leemen/leemen_entry_shortcut.h"
 #include "leemen/leemen_account_box.h"
 #include "leemen/leemen_privacy_actions_box.h"
+#include "leemen/leemen_privacy_warning_box.h"
 #include "leemen/leemen_private_accounts_box.h"
 #include "leemen/sync_service.h"
 #include "leemen/sync_peer_id.h"
@@ -162,6 +163,16 @@ void PinBox(
 			}
 		});
 	}
+	if (session->leemen().syncEnabled()
+		&& session->leemen().syncService().linked()) {
+		const auto deletion = box->addRow(object_ptr<Ui::LinkButton>(
+			box, tr::lng_leemen_account_delete_link(tr::now)));
+		deletion->setClickedCallback([=] {
+			if (weakController) {
+				ShowLeemenAccountDeletion(weakController.get());
+			}
+		});
+	}
 	box->addButton(tr::lng_cancel(), [=] { box->closeBox(); });
 	QObject::connect(input, &Ui::PasswordInput::submitted, box, [=] {
 		if (confirm) {
@@ -178,6 +189,12 @@ void PinBox(
 
 QString SyncStatus(not_null<Main::Session*> session) {
 	const auto &sync = session->leemen().syncService();
+	if (sync.deletingAccount()) {
+		return tr::lng_leemen_account_delete_sending(tr::now);
+	}
+	if (sync.accountDeletionPending()) {
+		return tr::lng_leemen_account_delete_pending(tr::now);
+	}
 	if (sync.resetState() == SyncService::ResetState::Pending) {
 		return tr::lng_leemen_reset_uncertain(tr::now);
 	}
@@ -256,6 +273,20 @@ void SyncBox(
 		box, tr::lng_leemen_terms_cross_border(), st::boxLabel));
 	const auto acceptedTerms = box->addRow(object_ptr<Ui::Checkbox>(
 		box, tr::lng_leemen_terms_accept(tr::now), false));
+	const auto reset = box->addRow(object_ptr<Ui::LinkButton>(
+		box, tr::lng_leemen_reset(tr::now)));
+	reset->setClickedCallback([=] {
+		if (weak) {
+			ShowPrivateSpaceReset(controller);
+		}
+	});
+	const auto deletion = box->addRow(object_ptr<Ui::LinkButton>(
+		box, tr::lng_leemen_account_delete_link(tr::now)));
+	deletion->setClickedCallback([=] {
+		if (weak) {
+			ShowLeemenAccountDeletion(controller);
+		}
+	});
 	const auto consentBusy = box->lifetime().make_state<bool>(false);
 	const auto submit = [=] {
 		if (!weak) {
@@ -300,6 +331,8 @@ void SyncBox(
 	};
 	const auto update = [=] {
 		const auto &sync = session->leemen().syncService();
+		reset->setVisible(sync.linked() && !sync.accountDeletionPending());
+		deletion->setVisible(sync.linked());
 		const auto needed = sync.state() == SyncService::State::NeedsPassphrase;
 		passphrase->setEnabled(needed);
 		recovery->setEnabled(needed);
@@ -316,15 +349,6 @@ void SyncBox(
 	space.changes() | rpl::on_next(update, label->lifetime());
 	QObject::connect(passphrase, &Ui::PasswordInput::submitted, box, submit);
 	box->addButton(tr::lng_leemen_sync_continue(), submit);
-	if (space.syncService().linked()) {
-		const auto reset = box->addRow(object_ptr<Ui::LinkButton>(
-			box, tr::lng_leemen_reset(tr::now)));
-		reset->setClickedCallback([=] {
-			if (weak) {
-				ShowPrivateSpaceReset(controller);
-			}
-		});
-	}
 	box->addButton(tr::lng_close(), [=] { box->closeBox(); });
 }
 
@@ -478,6 +502,13 @@ void ManageBox(
 		box,
 		tr::lng_leemen_active_about(),
 		st::boxLabel));
+	const auto privacyCheck = box->addRow(object_ptr<Ui::LinkButton>(
+		box, tr::lng_leemen_privacy_check(tr::now)));
+	privacyCheck->setClickedCallback([=] {
+		if (weak) {
+			ShowPrivateSpaceWarnings(controller);
+		}
+	});
 	const auto sync = box->addRow(object_ptr<Ui::LinkButton>(
 		box, tr::lng_leemen_sync_title(tr::now)));
 	sync->setClickedCallback([=] {

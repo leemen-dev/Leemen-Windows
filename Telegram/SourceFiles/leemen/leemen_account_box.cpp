@@ -33,7 +33,7 @@ namespace {
 
 constexpr auto kDevicePageSize = 25;
 
-bool AccountViewAllowed(not_null<Main::Session*> session) {
+bool AccountSessionAllowed(not_null<Main::Session*> session) {
 	const auto &space = session->leemen();
 	return session->domain().started()
 		&& &session->domain().active() == &session->account()
@@ -43,7 +43,12 @@ bool AccountViewAllowed(not_null<Main::Session*> session) {
 		&& PrivateAccountContentAllowed(session)
 		&& space.syncEnabled()
 		&& session->leemen().syncService().linked()
-		&& (space.managementAllowed() || space.needsPinSetup());
+		&& session->leemen().syncService().state() != SyncService::State::AccountDeleted;
+}
+
+bool AccountViewAllowed(not_null<Main::Session*> session) {
+	return AccountSessionAllowed(session)
+		&& (session->leemen().managementAllowed() || session->leemen().needsPinSetup());
 }
 
 QString DateText(std::int64_t milliseconds) {
@@ -82,6 +87,125 @@ QString PromoError(const Sync::Backend::Failure &failure) {
 	if (failure.code == "promo_already_redeemed") return tr::lng_leemen_promo_already_used(tr::now);
 	if (failure.kind == Sync::Backend::FailureKind::RateLimited) return tr::lng_leemen_promo_rate_limited(tr::now);
 	return tr::lng_leemen_promo_failed(tr::now);
+}
+
+void AccountDeletionBox(
+		not_null<Ui::GenericBox*> box,
+		not_null<Window::SessionController*> controller) {
+	struct State {
+		rpl::variable<QString> status;
+		QPointer<Ui::RoundButton> remove;
+		bool waiting = false;
+		bool rejected = false;
+		bool closing = false;
+		Fn<void()> refresh;
+	};
+	const auto session = &controller->session();
+	const auto weakSession = base::make_weak(session);
+	const auto weakBox = QPointer<Ui::GenericBox>(box.get());
+	const auto state = box->lifetime().make_state<State>();
+	box->setTitle(tr::lng_leemen_account_delete_title());
+	box->addRow(object_ptr<Ui::FlatLabel>(
+		box, tr::lng_leemen_account_delete_about(), st::boxLabel));
+	const auto confirmation = box->addRow(object_ptr<Ui::InputField>(
+		box, st::defaultInputField, tr::lng_leemen_account_delete_type()));
+	confirmation->setMaxLength(6);
+	confirmation->setInputMethodHints(Qt::ImhNoPredictiveText | Qt::ImhNoAutoUppercase);
+	box->addRow(object_ptr<Ui::FlatLabel>(box, state->status.value(), st::boxLabel));
+	Core::App().screenshotProtection().addContentReason(rpl::single(true), box->lifetime());
+	box->boxClosing() | rpl::on_next([=] {
+		state->closing = true;
+		confirmation->clear();
+		state->status = QString();
+	}, box->lifetime());
+	state->refresh = [=] {
+		if (state->closing) return;
+		if (!weakSession || !AccountSessionAllowed(session)) {
+			box->closeBox();
+			return;
+		}
+		const auto &sync = session->leemen().syncService();
+		const auto busy = state->waiting || sync.deletingAccount();
+		confirmation->setEnabled(!busy);
+		if (state->remove) state->remove->setEnabled(!busy);
+		if (busy) {
+			state->status = tr::lng_leemen_account_delete_sending(tr::now);
+		} else if (sync.accountDeletionPending()) {
+			state->status = tr::lng_leemen_account_delete_pending(tr::now);
+			if (sync.accountDeletionFailure().kind == Sync::Backend::FailureKind::RateLimited) {
+				state->status = state->status.current() + '\n'
+					+ tr::lng_leemen_account_delete_rate_limited(tr::now);
+			}
+		} else if (state->rejected) {
+			state->status = tr::lng_leemen_account_delete_rejected(tr::now);
+		}
+	};
+	const auto submit = [=] {
+		if (!weakSession || state->closing || state->waiting
+			|| !AccountSessionAllowed(session)) {
+			return;
+		}
+		auto &sync = session->leemen().syncService();
+		if (sync.deletingAccount()) return;
+		auto text = confirmation->getLastText();
+		if (text != u"DELETE"_q) {
+			confirmation->showError();
+			return;
+		}
+		state->waiting = true;
+		state->rejected = false;
+		confirmation->clear();
+		state->refresh();
+		if (!weakBox || !weakSession || state->closing) return;
+		const auto accepted = sync.deleteLeemenAccount(text, crl::guard(box, [=](bool success) {
+			if (state->closing) return;
+			if (!weakSession || success || !AccountSessionAllowed(session)) {
+				box->closeBox();
+				return;
+			}
+			state->waiting = false;
+			state->rejected = true;
+			confirmation->clear();
+			state->refresh();
+		}));
+		text.fill(QChar(0));
+		if (!accepted && weakBox && weakSession && !state->closing) {
+			state->waiting = false;
+			state->rejected = true;
+			confirmation->clear();
+			state->refresh();
+		}
+	};
+	state->remove = box->addButton(tr::lng_leemen_account_delete_title(), submit);
+	confirmation->submits() | rpl::on_next(submit, confirmation->lifetime());
+	const auto info = box->addRow(object_ptr<Ui::LinkButton>(
+		box, tr::lng_leemen_account_delete_info(tr::now)));
+	info->setClickedCallback([=] {
+		if (weakSession && AccountSessionAllowed(session)) {
+			UrlClickHandler::Open(u"https://leemen.app"_q
+				+ (Lang::Id().startsWith(u"ru"_q) ? u"/ru/"_q : u"/"_q)
+				+ u"delete-account"_q);
+		}
+	});
+	box->addButton(tr::lng_close(), [=] { box->closeBox(); });
+	session->leemen().syncService().changes() | rpl::on_next([=] {
+		state->refresh();
+	}, box->lifetime());
+	session->leemen().changes() | rpl::on_next([=] { state->refresh(); }, box->lifetime());
+	session->domain().activeValue() | rpl::on_next([=](Main::Account *account) {
+		if (!weakSession || account != &session->account()) box->closeBox();
+	}, box->lifetime());
+	session->account().sessionChanges() | rpl::on_next([=](Main::Session *current) {
+		if (current != session) box->closeBox();
+	}, box->lifetime());
+	Core::App().appDeactivatedValue() | rpl::on_next([=](bool away) {
+		if (away) box->closeBox();
+	}, box->lifetime());
+	Core::App().passcodeLockValue() | rpl::on_next([=](bool locked) {
+		if (locked) box->closeBox();
+	}, box->lifetime());
+	box->setFocusCallback([=] { confirmation->setFocusFast(); });
+	state->refresh();
 }
 
 void AccountBox(
@@ -226,7 +350,13 @@ void AccountBox(
 	};
 	addLink(tr::lng_leemen_terms_link(tr::now), u"terms"_q);
 	addLink(tr::lng_leemen_privacy_link(tr::now), u"privacy"_q);
-	addLink(tr::lng_leemen_account_delete_link(tr::now), u"delete-account"_q);
+	const auto remove = box->addRow(object_ptr<Ui::LinkButton>(
+		box, tr::lng_leemen_account_delete_link(tr::now)));
+	remove->setClickedCallback([=] {
+		if (weakSession && weakController && AccountViewAllowed(session)) {
+			ShowLeemenAccountDeletion(controller);
+		}
+	});
 	if (session->leemen().active()) {
 		const auto maximum = box->addRow(object_ptr<Ui::LinkButton>(box,
 			session->leemen().syncService().maxMode()
@@ -268,6 +398,19 @@ void AccountBox(
 void ShowLeemenAccount(not_null<Window::SessionController*> controller) {
 	if (AccountViewAllowed(&controller->session())) {
 		controller->show(Box(AccountBox, controller));
+	}
+}
+
+void ShowLeemenAccountDeletion(not_null<Window::SessionController*> controller) {
+	const auto session = &controller->session();
+	if (!AccountSessionAllowed(session)) return;
+	const auto weakSession = base::make_weak(session);
+	const auto weakController = base::make_weak(controller.get());
+	if (session->leemen().active() || session->leemen().managementAllowed()) {
+		session->leemen().lock();
+	}
+	if (weakSession && weakController && AccountSessionAllowed(session)) {
+		controller->show(Box(AccountDeletionBox, controller));
 	}
 }
 

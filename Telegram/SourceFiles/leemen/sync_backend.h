@@ -175,6 +175,7 @@ struct PremiumStatus {
 	ConsentType type,
 	std::string_view locale);
 [[nodiscard]] std::optional<SecretBytes> EncodePromoRequest(std::string_view code);
+[[nodiscard]] std::optional<SecretBytes> EncodeAccountDeleteRequest(std::string_view confirmation);
 
 [[nodiscard]] std::optional<SecretBytes> EncodeAuthRequest(
 	std::string_view initData,

@@ -1471,6 +1471,8 @@ PRIVATE
     leemen/leemen_private_limits.cpp
     leemen/leemen_privacy_actions_box.cpp
     leemen/leemen_privacy_actions_box.h
+    leemen/leemen_privacy_warning_box.cpp
+    leemen/leemen_privacy_warning_box.h
     leemen/private_accounts_state.cpp
     leemen/private_accounts_state.h
     leemen/leemen_private_accounts.cpp

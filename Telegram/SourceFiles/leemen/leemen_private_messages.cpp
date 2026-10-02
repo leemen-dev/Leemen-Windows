@@ -99,11 +99,14 @@ bool PrivateSpace::setMessageState(FullMsgId id, MessageState state) {
 		|| (state != MessageState::Hidden && state != MessageState::Exposed)) {
 		return false;
 	}
+	const auto weak = base::make_weak(_session);
 	bindPrivateMessageIntents();
+	if (!weak || _damaged) return false;
 	_messageChanges[id] = { StateName(state), 0, "local", {} };
 	save();
+	if (!weak || _damaged) return false;
 	_changes.fire({});
-	return true;
+	return weak && !_damaged;
 }
 
 bool PrivateSpace::markOffModeMessage(FullMsgId id) {
@@ -111,11 +114,14 @@ bool PrivateSpace::markOffModeMessage(FullMsgId id) {
 		|| !ValidId(id) || !IsClientMsgId(id.msg)) {
 		return false;
 	}
+	const auto weak = base::make_weak(_session);
 	bindPrivateMessageIntents();
+	if (!weak || _damaged) return false;
 	_messageChanges[id] = { "pending", 0, "local", {} };
 	save();
+	if (!weak || _damaged) return false;
 	_changes.fire({});
-	return true;
+	return weak && !_damaged;
 }
 
 void PrivateSpace::resolvePendingMessages(
@@ -125,7 +131,9 @@ void PrivateSpace::resolvePendingMessages(
 		|| (state != MessageState::Hidden && state != MessageState::Exposed)) {
 		return;
 	}
+	const auto weak = base::make_weak(_session);
 	bindPrivateMessageIntents();
+	if (!weak || _damaged) return;
 	auto changed = false;
 	for (const auto id : ids) {
 		if (hidden(id.peer) && ValidId(id)
@@ -136,7 +144,7 @@ void PrivateSpace::resolvePendingMessages(
 	}
 	if (changed) {
 		save();
-		_changes.fire({});
+		if (weak && !_damaged) _changes.fire({});
 	}
 }
 
@@ -150,9 +158,12 @@ void PrivateSpace::markOffModePinService(
 		|| messageState(id) == MessageState::Pending) {
 		return;
 	}
+	const auto weak = base::make_weak(_session);
 	bindPrivateMessageIntents();
+	if (!weak || _damaged) return;
 	_messageChanges[id] = { "pending", 0, "local", {} };
 	save();
+	if (!weak || _damaged) return;
 	// Service items may still be under construction when this hook runs.
 	crl::on_main(_session, [=] { _changes.fire({}); });
 }
@@ -174,8 +185,9 @@ void PrivateSpace::replacePrivateMessageId(FullMsgId oldId, MsgId newId) {
 		}
 	}
 	if (changed) {
+		const auto weak = base::make_weak(_session);
 		save();
-		_changes.fire({});
+		if (weak && !_damaged) _changes.fire({});
 	}
 }
 
@@ -206,10 +218,12 @@ void PrivateSpace::recordSelfPin(FullMsgId id, bool pinned) {
 	if (!hidden(id.peer) || !allowsMessage(id)) {
 		return;
 	}
+	const auto weak = base::make_weak(_session);
 	bindPrivateMessageIntents();
+	if (!weak || _damaged) return;
 	_selfPinChanges[id] = { pinned ? "present" : "removed", 0, "local", {} };
 	save();
-	_changes.fire({});
+	if (weak && !_damaged) _changes.fire({});
 }
 
 bool PrivateSpace::privateSearch(PeerId peer) const {
@@ -235,9 +249,12 @@ void PrivateSpace::recordSearch(PeerId peer) {
 		return;
 	}
 	if (privateSearch(peer) == active()) return;
+	const auto weak = base::make_weak(_session);
 	bindPrivateMessageIntents();
+	if (!weak || _damaged) return;
 	_searchChanges[peer] = { active() ? "present" : "removed", 0, "local", {} };
 	save();
+	if (!weak || _damaged) return;
 	crl::on_main(_session, [=] { _changes.fire({}); });
 }
 
@@ -280,7 +297,9 @@ void PrivateSpace::reconcilePrivateMessages() {
 	if (!_syncProjection) {
 		return;
 	}
+	const auto weak = base::make_weak(_session);
 	bindPrivateMessageIntents();
+	if (!weak || _damaged || !_syncProjection) return;
 	for (const auto values : { &_messageChanges, &_selfPinChanges }) {
 		for (auto i = values->begin(); i != values->end();) {
 			if (!hidden(i->first.peer)) i = values->erase(i);
@@ -325,7 +344,9 @@ void PrivateSpace::reconcilePrivateMessages() {
 void PrivateSpace::bindPrivateMessageIntents() {
 	if (!_syncEnabled || !_syncProjection) return;
 	if (_messageEpochKnown && _messagePinEpoch != _syncProjection->content.pin) {
+		const auto weak = base::make_weak(_session);
 		invalidatePrivateMessageIntents();
+		if (!weak || _damaged || !_syncProjection) return;
 	}
 	_messageEpochKnown = true;
 	_messagePinEpoch = _syncProjection->content.pin;
@@ -354,7 +375,9 @@ void PrivateSpace::flushPrivateMessages() {
 		|| !_syncEnabled || !_sync || !_sync->projection()) {
 		return;
 	}
+	const auto weak = base::make_weak(_session);
 	bindPrivateMessageIntents();
+	if (!weak || _damaged) return;
 	const auto messageReady = [&](const auto &entry) {
 		return entry.second.clock == 0 && IsServerMsgId(entry.first.msg)
 			&& (active() || entry.second.state == "pending");
@@ -369,7 +392,6 @@ void PrivateSpace::flushPrivateMessages() {
 	const auto messages = _messageChanges;
 	const auto pins = _selfPinChanges;
 	const auto searches = _searchChanges;
-	const auto weak = base::make_weak(_session);
 	const auto submitted = syncMutate([&](auto &, auto &content, std::int64_t clock) {
 		for (auto &[id, value] : _messageChanges) {
 			if (!messageReady(std::pair(id, value))) continue;
@@ -396,7 +418,7 @@ void PrivateSpace::flushPrivateMessages() {
 			content.privateSearchDialogIds[*Sync::CanonicalPeerKey(*id)] = value;
 		}
 	});
-	if (!weak) return;
+	if (!weak || _damaged) return;
 	if (!submitted) {
 		_messageChanges = messages;
 		_selfPinChanges = pins;

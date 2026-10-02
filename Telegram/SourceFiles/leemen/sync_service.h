@@ -44,6 +44,7 @@ public:
 		AuthorizationChanged,
 		ResetUncertain,
 		ResetConfirmed,
+		DeleteUncertain,
 	};
 	enum class MetadataStatus { Unknown, Loading, Ready, Failed };
 	enum class ConsentStatus { Unknown, Required, Accepted };
@@ -70,6 +71,10 @@ public:
 	bool redeemPromo(const QString &code, Fn<void(bool)> done);
 	[[nodiscard]] bool redeemingPromo() const;
 	[[nodiscard]] const Sync::Backend::Failure &promoFailure() const;
+	bool deleteLeemenAccount(const QString &confirmation, Fn<void(bool)> done);
+	[[nodiscard]] bool accountDeletionPending() const;
+	[[nodiscard]] bool deletingAccount() const;
+	[[nodiscard]] const Sync::Backend::Failure &accountDeletionFailure() const;
 	// A false return rejects the operation without calling its completion.
 	bool prepareMaximum(
 		const QString &passphrase,
