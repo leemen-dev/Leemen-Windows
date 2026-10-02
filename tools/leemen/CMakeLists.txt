@@ -86,6 +86,15 @@ add_executable(leemen_sync_session_snapshot_tests
     "${leemen_source_root}/test/leemen/sync_session_snapshot_tests.cpp"
 )
 target_link_libraries(leemen_sync_session_snapshot_tests PRIVATE OpenSSL::Crypto leemen::sodium)
+add_executable(leemen_realtime_protocol_tests
+    "${leemen_source_root}/leemen/realtime_protocol.cpp"
+    "${leemen_source_root}/leemen/sync_backend.cpp"
+    "${leemen_source_root}/leemen/sync_blob.cpp"
+    "${leemen_source_root}/leemen/sync_identifiers.cpp"
+    "${leemen_source_root}/leemen/sync_crypto.cpp"
+    "${leemen_source_root}/test/leemen/realtime_protocol_tests.cpp"
+)
+target_link_libraries(leemen_realtime_protocol_tests PRIVATE OpenSSL::Crypto leemen::sodium)
 
 foreach(leemen_test IN ITEMS
         leemen_private_space_tests
@@ -100,6 +109,7 @@ foreach(leemen_test IN ITEMS
         leemen_private_message_policy_tests
         leemen_private_accounts_tests
         leemen_sync_session_snapshot_tests
+        leemen_realtime_protocol_tests
         leemen_sync_crypto_tests
         leemen_sync_backend_tests)
     target_include_directories(${leemen_test} PRIVATE "${leemen_source_root}")

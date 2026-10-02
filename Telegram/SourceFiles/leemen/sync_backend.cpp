@@ -6,6 +6,7 @@
 #include <sodium.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <stdexcept>
 #include <utility>
@@ -487,6 +488,29 @@ Reply<bool> ParseOk(int status, std::string_view body) {
 	});
 }
 
+Reply<PromoReceipt> ParsePromo(int status, std::string_view body) {
+	if (status != 200) return { std::nullopt, ParseFailure(status, body) };
+	try {
+		const auto parsed = Parse(body);
+		const auto &object = AsObject(parsed.value);
+		if (!Boolean(Required(object, "ok"))) {
+			const auto reason = String(Required(object, "reason"), 64);
+			constexpr auto reasons = std::array{ "not_found", "expired", "max_uses_reached", "already_redeemed", "unknown_kind" };
+			if (std::ranges::find(reasons, reason) == reasons.end()) Fail();
+			return { std::nullopt, { FailureKind::Rejected, status, "promo_" + reason, {}, {} } };
+		}
+		auto receipt = PromoReceipt{
+			Uuid(Required(object, "entitlement_id")),
+			String(Required(object, "kind"), 64),
+			NullableTimestamp(Required(object, "expires_at")),
+		};
+		if (receipt.kind != "premium") Fail();
+		return { std::move(receipt), {} };
+	} catch (const Invalid &) {
+		return { std::nullopt, { FailureKind::Malformed, status, "invalid_response", {}, {} } };
+	}
+}
+
 std::optional<PremiumStatus> PremiumAtServerTime(const MeReply &reply) {
 	if (!reply.serverNowMs || *reply.serverNowMs <= 0) return std::nullopt;
 	auto result = PremiumStatus();
@@ -568,6 +592,41 @@ std::optional<SecretBytes> EncodeConsentRequest(ConsentType type, std::string_vi
 		{ "version", Text(std::string(kCurrentTermsVersion)) },
 		{ "locale", Text(std::string(locale)) },
 	});
+}
+
+std::optional<SecretBytes> EncodePromoRequest(std::string_view code) {
+	if (code.empty() || code.size() > 4096) return std::nullopt;
+	const auto validated = EncodeJson(JsonValue{ std::string(code) });
+	if (!validated) return std::nullopt;
+	const auto whitespace = [](std::uint32_t ch) {
+		return (ch >= 0x09 && ch <= 0x0d) || ch == 0x20 || ch == 0xa0
+			|| ch == 0x1680 || (ch >= 0x2000 && ch <= 0x200a)
+			|| ch == 0x2028 || ch == 0x2029 || ch == 0x202f
+			|| ch == 0x205f || ch == 0x3000 || ch == 0xfeff;
+	};
+	auto first = code.size();
+	auto last = std::size_t(0);
+	auto units = std::size_t(0);
+	auto trailing = std::size_t(0);
+	for (auto i = std::size_t(0); i < code.size();) {
+		const auto begin = i;
+		const auto leading = static_cast<unsigned char>(code[i++]);
+		const auto count = leading < 0x80 ? 1 : leading < 0xe0 ? 2 : leading < 0xf0 ? 3 : 4;
+		auto ch = std::uint32_t(leading & (count == 1 ? 0x7f : count == 2 ? 0x1f : count == 3 ? 0x0f : 0x07));
+		for (auto remaining = count - 1; remaining > 0; --remaining) {
+			ch = (ch << 6) | (static_cast<unsigned char>(code[i++]) & 0x3f);
+		}
+		if (whitespace(ch)) {
+			if (first != code.size()) ++trailing;
+		} else {
+			if (first == code.size()) first = begin;
+			last = i;
+			units += trailing + (ch > 0xffff ? 2 : 1);
+			trailing = 0;
+		}
+	}
+	if (!units || units > 64) return std::nullopt;
+	return EncodeRequest({ { "code", Text(std::string(code.substr(first, last - first))) } });
 }
 
 std::optional<SecretBytes> EncodeUpgradePrivacyRequest(

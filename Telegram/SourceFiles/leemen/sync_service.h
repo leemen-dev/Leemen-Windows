@@ -58,6 +58,8 @@ public:
 
 	void start();
 	void refresh();
+	bool refreshAccountMetadata();
+	void notifyRemoteChanged();
 	void stop();
 	void lockMax();
 	void unlockMax(const QString &passphrase, bool recovery = false);
@@ -65,6 +67,9 @@ public:
 	[[nodiscard]] ConsentStatus consentStatus() const;
 	[[nodiscard]] bool needsTermsConsent() const;
 	[[nodiscard]] bool acceptingTerms() const;
+	bool redeemPromo(const QString &code, Fn<void(bool)> done);
+	[[nodiscard]] bool redeemingPromo() const;
+	[[nodiscard]] const Sync::Backend::Failure &promoFailure() const;
 	// A false return rejects the operation without calling its completion.
 	bool prepareMaximum(
 		const QString &passphrase,

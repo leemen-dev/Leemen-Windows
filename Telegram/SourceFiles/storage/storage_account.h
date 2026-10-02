@@ -84,6 +84,7 @@ public:
 	}
 
 	void writeSessionSettings();
+	[[nodiscard]] bool writeLeemenSettingsSync();
 	void writeMtpData();
 	void writeMtpConfig();
 
@@ -244,7 +245,7 @@ private:
 	void clearLegacyFiles();
 	void writeMapDelayed();
 	void writeMapQueued();
-	void writeMap();
+	void writeMap(QByteArray *expectedPayload = nullptr);
 
 	void readLocations();
 	void writeLocations();

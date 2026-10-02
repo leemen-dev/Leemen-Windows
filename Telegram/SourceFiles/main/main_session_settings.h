@@ -37,6 +37,9 @@ public:
 	[[nodiscard]] bool sessionSettingsReadFailed() const {
 		return _sessionSettingsReadFailed;
 	}
+	void markSessionSettingsReadFailed() {
+		_sessionSettingsReadFailed = true;
+	}
 	[[nodiscard]] const QByteArray &leemenPrivateSpace() const {
 		return _leemenPrivateSpace;
 	}

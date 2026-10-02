@@ -130,3 +130,33 @@
 "lng_leemen_public_pin_both_sides" = "Также закрепить для собеседника";
 "lng_leemen_public_pin_failed" = "Не удалось изменить закрепление. Проверьте соединение и доступ к сообщению.";
 "lng_leemen_public_pin_service" = "Вы закрепили сообщение";
+
+"lng_leemen_intro_about" = "Общение в Telegram со скрытым пространством Leemen.";
+"lng_leemen_about_text" = "Leemen Desktop — независимый клиент на основе Telegram Desktop, использующий {api_link}. Он добавляет скрытое пространство и синхронизацию Leemen.";
+
+"lng_leemen_account_title" = "Аккаунт Leemen";
+"lng_leemen_account_premium_perpetual" = "Leemen Premium активен без ограничения срока.";
+"lng_leemen_account_premium_until" = "Leemen Premium активен до {date}.";
+"lng_leemen_account_devices" = "Зарегистрированные устройства";
+"lng_leemen_account_devices_empty" = "Сервер не вернул зарегистрированных устройств.";
+"lng_leemen_account_devices_more" = "Показать больше устройств";
+"lng_leemen_account_device_unnamed" = "Устройство без названия";
+"lng_leemen_account_platform_other" = "Другая платформа";
+"lng_leemen_account_date_unknown" = "Неизвестно";
+"lng_leemen_account_last_seen" = "Последняя активность: {date}";
+"lng_leemen_account_loading" = "Обновляем данные аккаунта…";
+"lng_leemen_account_unavailable" = "Данные аккаунта недоступны. Попробуйте обновить их.";
+"lng_leemen_account_refresh" = "Обновить данные аккаунта";
+"lng_leemen_account_delete_link" = "Удалить аккаунт Leemen…";
+"lng_leemen_promo_code" = "Промокод";
+"lng_leemen_promo_redeem" = "Применить код";
+"lng_leemen_promo_redeeming" = "Применяем код…";
+"lng_leemen_promo_refreshing" = "Код применён. Обновляем статус аккаунта…";
+"lng_leemen_promo_done" = "Код применён. Статус аккаунта обновлён.";
+"lng_leemen_promo_status_unavailable" = "Код применён, но статус аккаунта не обновился. Нажмите «Обновить данные аккаунта», чтобы повторить проверку.";
+"lng_leemen_promo_not_found" = "Такой код не найден.";
+"lng_leemen_promo_expired" = "Срок действия кода истёк.";
+"lng_leemen_promo_used_up" = "Достигнут лимит использований этого кода.";
+"lng_leemen_promo_already_used" = "Этот код уже применён к данному аккаунту.";
+"lng_leemen_promo_rate_limited" = "Слишком много попыток. Попробуйте позже.";
+"lng_leemen_promo_failed" = "Не удалось применить код. Проверьте его и попробуйте ещё раз.";

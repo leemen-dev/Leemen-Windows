@@ -100,6 +100,12 @@ struct WrapReceipt {
 	std::int64_t wrapVersion = 0;
 };
 
+struct PromoReceipt {
+	std::string entitlementId;
+	std::string kind;
+	std::optional<std::int64_t> expiresAtMs;
+};
+
 struct AccountMetadata {
 	Generation generation;
 	std::int64_t telegramUserId = 0;
@@ -158,6 +164,7 @@ struct PremiumStatus {
 [[nodiscard]] Reply<PutReceipt> ParsePut(int httpStatus, std::string_view body);
 [[nodiscard]] Reply<DeviceReceipt> ParseDevice(int httpStatus, std::string_view body);
 [[nodiscard]] Reply<WrapReceipt> ParseWrapReceipt(int httpStatus, std::string_view body);
+[[nodiscard]] Reply<PromoReceipt> ParsePromo(int httpStatus, std::string_view body);
 [[nodiscard]] Reply<MeReply> ParseMe(int httpStatus, std::string_view body);
 [[nodiscard]] Reply<std::string> ParseSessionStatus(int httpStatus, std::string_view body);
 [[nodiscard]] Reply<bool> ParseOk(int httpStatus, std::string_view body);
@@ -167,6 +174,7 @@ struct PremiumStatus {
 [[nodiscard]] std::optional<SecretBytes> EncodeConsentRequest(
 	ConsentType type,
 	std::string_view locale);
+[[nodiscard]] std::optional<SecretBytes> EncodePromoRequest(std::string_view code);
 
 [[nodiscard]] std::optional<SecretBytes> EncodeAuthRequest(
 	std::string_view initData,

@@ -6,6 +6,7 @@
 #include "leemen/sync_backend.h"
 #include "leemen/sync_crypto.h"
 #include "leemen/max_privacy.h"
+#include "leemen/sync_realtime.h"
 #include "main/main_account.h"
 #include "main/main_domain.h"
 #include "main/main_session.h"
@@ -202,6 +203,12 @@ struct SyncService::Data {
 	void requestInitData(not_null<UserData*> bot);
 	void postAuth(Sync::SecretBytes initData);
 	void fetchKey();
+	void checkSession(bool ensureFresh = false);
+	void updateRealtime();
+	void scheduleRemoteRefresh();
+	void flushRemoteRefresh();
+	bool redeemPromo(const QString &code, Fn<void(bool)> done);
+	void finishPromo(bool success, Backend::Failure problem = {});
 	bool fetchMe();
 	void acceptMe(int status, const QByteArray &bytes);
 	void failMe(Error error);
@@ -254,6 +261,8 @@ struct SyncService::Data {
 	QTimer poll;
 	QTimer retry;
 	QTimer premiumTimer;
+	QTimer remoteRefresh;
+	std::unique_ptr<SyncRealtime> realtime;
 	mtpRequestId mtpRequest = 0;
 	int transportRetries = 0;
 	std::set<QNetworkReply*> replies;
@@ -264,6 +273,11 @@ struct SyncService::Data {
 	bool renewalRetried = false;
 	bool wrapAttempted = false;
 	bool transportRetryPending = false;
+	bool sessionCheckInFlight = false;
+	bool sessionCheckPending = false;
+	bool remoteChangePending = false;
+	Fn<void(bool)> promoDone;
+	Backend::Failure promoFailure;
 	State state = State::Idle;
 	Error error = Error::None;
 	MetadataStatus metadataStatus = MetadataStatus::Unknown;
@@ -302,6 +316,7 @@ SyncService::Data::Data(SyncService *owner, not_null<Main::Session*> session)
 : owner(owner)
 , session(session)
 , api(&session->mtp()) {
+	realtime = std::make_unique<SyncRealtime>([=] { owner->notifyRemoteChanged(); }, owner);
 	mtpTimeout.setSingleShot(true);
 	QObject::connect(&mtpTimeout, &QTimer::timeout, owner, [=, this] {
 		block(Error::Transport);
@@ -321,6 +336,11 @@ SyncService::Data::Data(SyncService *owner, not_null<Main::Session*> session)
 		updatePremiumDeadline();
 		publish(state, error);
 	});
+	remoteRefresh.setSingleShot(true);
+	remoteRefresh.setInterval(200);
+	QObject::connect(&remoteRefresh, &QTimer::timeout, owner, [=, this] {
+		flushRemoteRefresh();
+	});
 }
 
 void SyncService::Data::watch() {
@@ -328,6 +348,7 @@ void SyncService::Data::watch() {
 	const auto session = this->session;
 	Core::App().appDeactivatedValue() | rpl::on_next([=, this](bool away) {
 		if (away) {
+			realtime->stop();
 			owner->lockMax();
 		} else if (enabled && state == State::Blocked && error == Error::Transport) {
 			retryTransport();
@@ -348,7 +369,10 @@ void SyncService::Data::watch() {
 	}, lifetime);
 	Core::App().passcodeLockValue() | rpl::on_next([=](bool locked) {
 		if (locked) {
+			owner->_data->realtime->stop();
 			owner->lockMax();
+		} else if (owner->_data->enabled) {
+			owner->refresh();
 		}
 	}, lifetime);
 }
@@ -357,6 +381,11 @@ void SyncService::Data::cancel() {
 	++epoch;
 	clearPrivacy();
 	finishConsent(false);
+	finishPromo(false);
+	sessionCheckInFlight = false;
+	sessionCheckPending = false;
+	remoteRefresh.stop();
+	realtime->stop();
 	resetAuthorizing = false;
 	if (auto done = std::exchange(resetDone, nullptr)) {
 		crl::on_main([done = std::move(done)] { done(false); });
@@ -381,6 +410,12 @@ void SyncService::Data::cancel() {
 bool SyncService::Data::publish(State next, Error problem) {
 	state = next;
 	error = problem;
+	if (enabled && !token.bytes().empty() && resetState == ResetState::None
+		&& (state == State::NeedsPassphrase || state == State::NeedsConsent || state == State::Ready)) {
+		if (!poll.isActive()) poll.start();
+	}
+	scheduleRemoteRefresh();
+	updateRealtime();
 	const auto guard = QPointer<SyncService>(owner);
 	const auto before = epoch;
 	changes.fire({});
@@ -687,10 +722,138 @@ void SyncService::Data::fetchKey() {
 	});
 }
 
+void SyncService::Data::checkSession(bool ensureFresh) {
+	if (!enabled || token.bytes().empty() || !generation
+		|| resetState != ResetState::None || state == State::AccountDeleted
+		|| error == Error::GenerationChanged || error == Error::AuthorizationChanged
+		|| session->account().maybeSession() != session
+		|| QGuiApplication::applicationState() != Qt::ApplicationActive) {
+		return;
+	}
+	if (sessionCheckInFlight) {
+		sessionCheckPending = sessionCheckPending || ensureFresh;
+		return;
+	}
+	sessionCheckInFlight = true;
+	http("GET", u"session/status"_q, std::nullopt,
+		[=, this](int status, const QByteArray &bytes) {
+			sessionCheckInFlight = false;
+			const auto repeat = std::exchange(sessionCheckPending, false);
+			const auto result = Backend::ParseSessionStatus(status, View(bytes));
+			if (result.value) {
+				if (!generation || *result.value != generation->masterAccountId) {
+					block(Error::GenerationChanged);
+					return;
+				}
+			} else if (result.failure.kind == Backend::FailureKind::AccountDeleted
+				|| result.failure.kind == Backend::FailureKind::Unauthorized
+				|| result.failure.kind == Backend::FailureKind::GenerationChanged) {
+				failure(result.failure);
+				return;
+			}
+			if (repeat) checkSession();
+		}, true, [=, this](Error) {
+			sessionCheckInFlight = false;
+			if (std::exchange(sessionCheckPending, false)) checkSession();
+		});
+}
+
+void SyncService::Data::updateRealtime() {
+	if (!enabled || !generation || token.bytes().empty()
+		|| resetState != ResetState::None || consentStatus != ConsentStatus::Accepted
+		|| awaitingConsent || state == State::AccountDeleted
+		|| error == Error::GenerationChanged || error == Error::AuthorizationChanged
+		|| QGuiApplication::applicationState() != Qt::ApplicationActive
+		|| Core::App().passcodeLocked()) {
+		realtime->stop();
+		return;
+	}
+	if (!realtime->start(QString::fromStdString(generation->syncAccountId))) {
+		realtime->stop();
+	}
+}
+
+void SyncService::Data::scheduleRemoteRefresh() {
+	if (!remoteChangePending || !enabled || token.bytes().empty()
+		|| resetState != ResetState::None || privacyOperation != PrivacyOperation::Idle
+		|| promoDone || consentDone || metadataStatus == MetadataStatus::Loading
+		|| error == Error::GenerationChanged || error == Error::AuthorizationChanged
+		|| (state != State::Ready && state != State::NeedsPassphrase && state != State::NeedsConsent
+			&& !(state == State::Blocked && error == Error::Transport))) {
+		return;
+	}
+	if (!remoteRefresh.isActive()) remoteRefresh.start();
+}
+
+void SyncService::Data::flushRemoteRefresh() {
+	if (!remoteChangePending || !enabled || token.bytes().empty()
+		|| resetState != ResetState::None || privacyOperation != PrivacyOperation::Idle
+		|| promoDone || consentDone || metadataStatus == MetadataStatus::Loading
+		|| error == Error::GenerationChanged || error == Error::AuthorizationChanged
+		|| (state != State::Ready && state != State::NeedsPassphrase && state != State::NeedsConsent
+			&& !(state == State::Blocked && error == Error::Transport))
+		|| QGuiApplication::applicationState() != Qt::ApplicationActive) {
+		return;
+	}
+	remoteChangePending = false;
+	owner->refresh();
+}
+
+void SyncService::Data::finishPromo(bool success, Backend::Failure problem) {
+	if (auto done = std::exchange(promoDone, nullptr)) {
+		promoFailure = std::move(problem);
+		crl::on_main([done = std::move(done), success] { done(success); });
+	}
+}
+
+bool SyncService::Data::redeemPromo(const QString &code, Fn<void(bool)> done) {
+	if (!done || !canUnlockMaximum() || token.bytes().empty() || !generation
+		|| resetState != ResetState::None || privacyOperation != PrivacyOperation::Idle
+		|| consentStatus != ConsentStatus::Accepted || awaitingConsent || promoDone
+		|| (state != State::Ready && state != State::NeedsPassphrase) || code.size() > 4096) {
+		return false;
+	}
+	auto encoded = code.toUtf8();
+	auto body = Backend::EncodePromoRequest(View(encoded));
+	Wipe(encoded);
+	if (!body) {
+		promoFailure = { Backend::FailureKind::Rejected, 0, "bad_code", {}, {} };
+		return false;
+	}
+	promoDone = std::move(done);
+	promoFailure = {};
+	++metadataRequestId;
+	if (metadataStatus == MetadataStatus::Loading) metadataStatus = MetadataStatus::Failed;
+	poll.stop();
+	if (!publish(state, error)) {
+		return true;
+	}
+	http("POST", u"promo/redeem"_q, std::move(body),
+		[=, this](int status, const QByteArray &bytes) {
+			const auto result = Backend::ParsePromo(status, View(bytes));
+			finishPromo(result.value.has_value(), result.failure);
+			if (!result.value && (result.failure.kind == Backend::FailureKind::Unauthorized
+				|| result.failure.kind == Backend::FailureKind::AccountDeleted
+				|| result.failure.kind == Backend::FailureKind::GenerationChanged)) {
+				failure(result.failure);
+				return;
+			}
+			if (!publish(state, error)) return;
+			if (result.value || result.failure.kind == Backend::FailureKind::Malformed
+				|| result.failure.kind == Backend::FailureKind::Retryable) {
+				fetchMe();
+			}
+		}, true, [=, this](Error) {
+			finishPromo(false, { Backend::FailureKind::Retryable, 0, "transport", {}, {} });
+			if (publish(state, error)) fetchMe();
+		});
+	return true;
+}
+
 bool SyncService::Data::fetchMe() {
 	if (metadataStatus == MetadataStatus::Loading
 		|| privacyOperation != PrivacyOperation::Idle
-		|| !consentWrites.empty()) {
+		|| !consentWrites.empty() || promoDone) {
 		return true;
 	}
 	const auto guard = QPointer<SyncService>(owner);
@@ -899,7 +1062,7 @@ void SyncService::Data::clearPrivacy() {
 }
 
 bool SyncService::Data::canPreparePrivacy(bool maximum) const {
-	return canUnlockMaximum() && state == State::Ready && masterKey
+	return canUnlockMaximum() && state == State::Ready && masterKey && !promoDone
 		&& resetState == ResetState::None
 		&& !token.bytes().empty() && !coordinator.pendingMutation()
 		&& privacyOperation == PrivacyOperation::Idle
@@ -1658,6 +1821,9 @@ SyncService::~SyncService() {
 }
 
 void SyncService::start() {
+	if (_data->state == State::AccountDeleted) {
+		return;
+	}
 	if (_data->resetState != ResetState::None) {
 		if (!_data->resetDone) {
 			_data->enabled = true;
@@ -1684,8 +1850,27 @@ void SyncService::start() {
 }
 
 void SyncService::refresh() {
+	if (!_data->enabled || _data->token.bytes().empty()
+		|| _data->resetState != ResetState::None || _data->state == State::AccountDeleted) {
+		return;
+	}
+	_data->updateRealtime();
+	const auto guard = QPointer<SyncService>(this);
+	const auto before = _data->epoch;
+	_data->checkSession(true);
+	if (!guard || guard->_data->epoch != before) return;
+	if (_data->promoDone || _data->privacyOperation != PrivacyOperation::Idle
+		|| _data->state == State::Reading || _data->state == State::Writing) {
+		_data->remoteChangePending = true;
+		return;
+	}
 	if (_data->enabled && _data->awaitingConsent && !_data->token.bytes().empty()
 		&& _data->state == State::NeedsConsent) {
+		_data->fetchMe();
+		return;
+	}
+	if (_data->state == State::NeedsPassphrase
+		|| (!_data->masterKey && _data->state == State::Blocked && _data->error == Error::Transport)) {
 		_data->fetchMe();
 		return;
 	}
@@ -1704,9 +1889,30 @@ void SyncService::refresh() {
 	_data->pull();
 }
 
+bool SyncService::refreshAccountMetadata() {
+	if (!_data->canUnlockMaximum() || _data->token.bytes().empty()
+		|| _data->resetState != ResetState::None || _data->promoDone || _data->consentDone
+		|| _data->privacyOperation != PrivacyOperation::Idle
+		|| _data->state == State::AccountDeleted
+		|| _data->error == Error::GenerationChanged || _data->error == Error::AuthorizationChanged) {
+		return false;
+	}
+	const auto guard = QPointer<SyncService>(this);
+	const auto before = _data->epoch;
+	_data->checkSession();
+	return guard && guard->_data->epoch == before && guard->_data->fetchMe();
+}
+
+void SyncService::notifyRemoteChanged() {
+	if (!_data->enabled || _data->state == State::AccountDeleted) return;
+	_data->remoteChangePending = true;
+	_data->scheduleRemoteRefresh();
+}
+
 void SyncService::stop() {
 	_data->cancel();
 	_data->enabled = false;
+	_data->remoteChangePending = false;
 	_data->keepPendingAndClose();
 	_data->token.clear();
 	_data->masterKey.reset();
@@ -1725,6 +1931,16 @@ void SyncService::stop() {
 void SyncService::lockMax() {
 	if (_data->resetDone) {
 		_data->finishReset(false, Error::ResetUncertain);
+		return;
+	}
+	if (_data->promoDone) {
+		_data->cancel();
+		if (_data->maximumMode) {
+			_data->keepPendingAndClose();
+			_data->masterKey.reset();
+			_data->bootstrap.reset();
+		}
+		_data->publish(_data->maximumMode ? State::NeedsPassphrase : _data->state, _data->error);
 		return;
 	}
 	if (_data->consentDone) {
@@ -1810,6 +2026,18 @@ bool SyncService::acceptingTerms() const {
 	return bool(_data->consentDone);
 }
 
+bool SyncService::redeemPromo(const QString &code, Fn<void(bool)> done) {
+	return _data->redeemPromo(code, std::move(done));
+}
+
+bool SyncService::redeemingPromo() const {
+	return bool(_data->promoDone);
+}
+
+const Sync::Backend::Failure &SyncService::promoFailure() const {
+	return _data->promoFailure;
+}
+
 bool SyncService::commitMaximum(
 		std::uint64_t id,
 		bool recoverySaved,
@@ -1848,6 +2076,7 @@ bool SyncService::completeLocalReset() {
 	_data->token.clear();
 	_data->maximumMode = false;
 	_data->resetState = ResetState::None;
+	_data->remoteChangePending = false;
 	_data->metadata.reset();
 	_data->metadataReceivedAt.reset();
 	_data->metadataStatus = MetadataStatus::Unknown;
@@ -1891,6 +2120,7 @@ bool SyncService::privacyOperationBusy() const {
 
 bool SyncService::submit(Sync::FilterBlob filter, Sync::ContentBlob content) {
 	if (_data->state != State::Ready || !_data->masterKey
+		|| _data->promoDone
 		|| _data->consentStatus != ConsentStatus::Accepted || _data->awaitingConsent
 		|| _data->resetState != ResetState::None
 		|| _data->privacyOperation != PrivacyOperation::Idle) {

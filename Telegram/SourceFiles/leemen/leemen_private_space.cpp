@@ -18,6 +18,7 @@
 #include "main/main_domain.h"
 #include "main/main_session.h"
 #include "main/main_session_settings.h"
+#include "storage/storage_account.h"
 #include "media/player/media_player_instance.h"
 #include "window/notifications_manager.h"
 #include "window/window_session_controller.h"
@@ -341,6 +342,10 @@ void PrivateSpace::finishPinCreation(
 	_failedAttempts = 0;
 	_blockedUntil = 0;
 	save();
+	if (_damaged) {
+		done(false);
+		return;
+	}
 	_session->data().notifyUnreadBadgeChanged();
 	_changes.fire({});
 	done(true);
@@ -373,6 +378,10 @@ void PrivateSpace::finishPinVerification(
 	_failedAttempts = 0;
 	_blockedUntil = 0;
 	save();
+	if (_damaged) {
+		done(false);
+		return;
+	}
 	if (_syncEnabled && syncImportLocal(request, done)) {
 		return;
 	}
@@ -436,7 +445,7 @@ bool PrivateSpace::setHidden(PeerId peer, bool hide) {
 		}
 		save();
 	}, peer);
-	return true;
+	return !_damaged;
 }
 
 bool PrivateSpace::disable() {
@@ -459,7 +468,7 @@ bool PrivateSpace::disable() {
 		_blockedUntil = 0;
 		save();
 	});
-	return true;
+	return !_damaged;
 }
 
 std::set<PeerId> PrivateSpace::affectedPeers(PeerId extra, bool allPeers) const {
@@ -666,6 +675,9 @@ void PrivateSpace::read(const QByteArray &serialized) {
 }
 
 void PrivateSpace::save() {
+	if (_damaged) {
+		return;
+	}
 	auto serialized = QByteArray();
 	if (_pin || !_messageChanges.empty() || !_selfPinChanges.empty() || !_searchChanges.empty()) {
 		auto stream = QDataStream(&serialized, QIODevice::WriteOnly);
@@ -685,7 +697,27 @@ void PrivateSpace::save() {
 	if (_syncEnabled && _sync && !_damaged) {
 		saveSync();
 	} else {
-		_session->saveSettings();
+		persistProtection();
+	}
+}
+
+void PrivateSpace::persistProtection() {
+	if (_session->local().writeLeemenSettingsSync()) {
+		return;
+	}
+	const auto weak = base::make_weak(_session.get());
+	_damaged = true;
+	_session->settings().markSessionSettingsReadFailed();
+	_pinWindow.clear();
+	cancelPinOperation(_pendingPinRequest);
+	if (_sync) {
+		_sync->stop();
+	}
+	if (weak) {
+		transition([&] {
+			_managementAuthorized = false;
+			_state.setActive(false);
+		}, 0, true);
 	}
 }
 

@@ -7,6 +7,7 @@
 #include "leemen/leemen_private_space.h"
 #include "leemen/leemen_max_privacy_box.h"
 #include "leemen/leemen_entry_shortcut.h"
+#include "leemen/leemen_account_box.h"
 #include "leemen/leemen_privacy_actions_box.h"
 #include "leemen/leemen_private_accounts_box.h"
 #include "leemen/sync_service.h"
@@ -396,6 +397,13 @@ void LimitsBox(
 	const auto weakBox = QPointer<Ui::GenericBox>(box.get());
 	const auto session = &controller->session();
 	box->setTitle(tr::lng_leemen_limits_title());
+	const auto account = box->addRow(object_ptr<Ui::LinkButton>(
+		box, tr::lng_leemen_account_title(tr::now)));
+	account->setClickedCallback([=] {
+		if (weak) {
+			ShowLeemenAccount(controller);
+		}
+	});
 	box->addRow(object_ptr<Ui::FlatLabel>(
 		box, tr::lng_leemen_limits_about(), st::boxLabel));
 	const auto premium = box->addRow(object_ptr<Ui::LinkButton>(
@@ -457,6 +465,15 @@ void ManageBox(
 	const auto session = &controller->session();
 	const auto weak = base::make_weak(controller.get());
 	box->setTitle(tr::lng_leemen_private_space());
+	if (session->leemen().syncEnabled()) {
+		const auto account = box->addRow(object_ptr<Ui::LinkButton>(
+			box, tr::lng_leemen_account_title(tr::now)));
+		account->setClickedCallback([=] {
+			if (weak) {
+				ShowLeemenAccount(controller);
+			}
+		});
+	}
 	box->addRow(object_ptr<Ui::FlatLabel>(
 		box,
 		tr::lng_leemen_active_about(),

@@ -417,6 +417,77 @@ void TestRequiredConsent() {
 	}
 }
 
+void TestPromoAndSessionGuard() {
+	const auto requestCode = [](std::string_view input) {
+		const auto request = Request(EncodePromoRequest(input));
+		Check(Fields(request).size() == 1, "promo sends only code, no invented entitlement");
+		return std::get<std::string>(Fields(request).at("code").value);
+	};
+	Check(requestCode(" \tMiXeD-Promo\r\n") == "MiXeD-Promo", "promo trim preserves code case");
+	Check(requestCode("\xef\xbb\xbf\xe2\x80\xaf" "Ab\xc2\xa0") == "Ab", "promo trims exact JavaScript Unicode whitespace");
+	Check(requestCode("\xc2\x85" "Ab") == "\xc2\x85" "Ab", "non-JavaScript whitespace remains part of opaque code");
+	Check(requestCode("a b") == "a b", "internal whitespace is not collapsed");
+	Check(requestCode(std::string(64, 'A')).size() == 64, "maximum code length accepted");
+	Check(!EncodePromoRequest(std::string(65, 'A')), "oversized ASCII promo rejected");
+	auto unicode = std::string();
+	for (auto i = 0; i != 32; ++i) unicode += "\xf0\x9f\x98\x80";
+	Check(requestCode(unicode) == unicode, "backend UTF16 length accepts 32 supplementary code points");
+	Check(!EncodePromoRequest(unicode + "x"), "UTF16 length cannot be bypassed with supplementary code points");
+	for (const auto input : { "", " \t\n", "\xef\xbb\xbf", "\xc0\x80", "\xed\xa0\x80", "\xf0\x9f" }) {
+		Check(!EncodePromoRequest(input), "empty or invalid UTF8 promo rejected");
+	}
+	Check(!EncodePromoRequest(std::string(4097, ' ')), "promo allocation bound applies before trimming");
+	const auto success = std::string("{\"ok\":true,\"entitlement_id\":\"") + kMasterId
+		+ "\",\"kind\":\"premium\",\"expires_at\":null}";
+	const auto receipt = ParsePromo(200, success);
+	Check(receipt.value && receipt.value->entitlementId == kMasterId
+		&& receipt.value->kind == "premium" && !receipt.value->expiresAtMs, "lifetime promo receipt exact");
+	auto expiring = *ParseJson(success).value;
+	Fields(expiring)["expires_at"] = Text(kFuture);
+	Check(ParsePromo(200, Body(expiring)).value->expiresAtMs == ParseTimestamp(kFuture), "expiring receipt timestamp exact");
+	for (const auto *field : { "ok", "entitlement_id", "kind", "expires_at" }) {
+		auto broken = *ParseJson(success).value;
+		Fields(broken).erase(field);
+		Check(!ParsePromo(200, Body(broken)).value, "partial receipt cannot claim success");
+	}
+	for (const auto &[field, value] : std::vector<std::pair<std::string, JsonValue>>{
+		{ "ok", Text("true") }, { "entitlement_id", Text("invalid") },
+		{ "entitlement_id", Text("00000000-0000-0000-0000-000000000000") },
+		{ "kind", Text("trial") }, { "expires_at", Text("2026-02-30T00:00:00Z") },
+		{ "expires_at", Number("1770000000000") },
+	}) {
+		auto broken = *ParseJson(success).value;
+		Fields(broken)[field] = value;
+		Check(!ParsePromo(200, Body(broken)).value, "malformed identity kind grant or expiry cannot acknowledge redemption");
+	}
+	for (const auto body : {
+		R"({"ok":true})", R"({"ok":false})", R"({"ok":false,"reason":"future_reason"})",
+		R"({"ok":false,"reason":"auth_account_deleted"})", R"({"ok":true,"ok":false})",
+	}) {
+		const auto malformed = ParsePromo(200, body);
+		Check(!malformed.value && malformed.failure.kind == FailureKind::Malformed, "malformed receipt never becomes success or deleted account");
+	}
+	for (const auto reason : { "not_found", "expired", "max_uses_reached", "already_redeemed", "unknown_kind" }) {
+		const auto rejected = ParsePromo(200, std::string("{\"ok\":false,\"reason\":\"") + reason + "\"}");
+		Check(!rejected.value && rejected.failure.kind == FailureKind::Rejected
+			&& rejected.failure.code == std::string("promo_") + reason, "known promo failure preserved without HTTP error");
+	}
+	Check(!ParsePromo(201, success).value, "unexpected receipt HTTP status rejected");
+	Check(ParsePromo(401, R"({"error":{"code":"auth_account_deleted"}})").failure.kind == FailureKind::AccountDeleted,
+		"promo obeys exact authenticated account deletion signal");
+	for (const auto status : { 0, 200, 404, 503 }) {
+		const auto result = ParseSessionStatus(status, R"({"error":{"code":"auth_account_deleted"}})");
+		Check(!result.value && result.failure.kind != FailureKind::AccountDeleted,
+			"status check cannot delete a session on network malformed success 404 or outage");
+	}
+	Check(ParseSessionStatus(401, R"({"error":{"code":"auth_account_deleted"}})").failure.kind == FailureKind::AccountDeleted,
+		"only 401 exact deleted-generation code authorizes local logout");
+	Check(ParseSessionStatus(401, R"({"error":{"code":"auth_invalid"}})").failure.kind == FailureKind::Unauthorized,
+		"expired session needs fresh auth without deletion");
+	Check(ParseSessionStatus(503, R"({"error":{"code":"auth_lookup_failed"}})").failure.kind == FailureKind::Retryable,
+		"lookup outage remains retryable");
+}
+
 } // namespace
 
 int main() {
@@ -430,5 +501,6 @@ int main() {
 	TestRequests();
 	TestMaximumPrivacy();
 	TestRequiredConsent();
+	TestPromoAndSessionGuard();
 	std::cout << "Sync backend checks passed: " << Checks << '\n';
 }

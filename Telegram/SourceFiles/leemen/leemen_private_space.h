@@ -77,6 +77,7 @@ public:
 private:
 	void read(const QByteArray &serialized);
 	void save();
+	void persistProtection();
 	void initPrivateMessages();
 	void reconcilePrivateMessages();
 	void invalidatePrivateMessageIntents();
@@ -131,6 +132,7 @@ private:
 	bool _syncTrusted = false;
 	bool _syncApplying = false;
 	bool _syncChangePending = false;
+	bool _syncDeletedLogoutScheduled = false;
 	std::optional<Sync::LocalIntentStamp> _syncDisableLocal;
 	std::uint64_t _syncImportUnlockRequest = 0;
 	QString _syncDevice;

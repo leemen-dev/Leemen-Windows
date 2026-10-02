@@ -181,7 +181,7 @@ void CommittedFloors() {
 	snapshot.checkpoint = coordinator.checkpoint();
 	Check(!snapshot.checkpoint.pending && snapshot.checkpoint.filterVersionFloor == 4
 		&& snapshot.checkpoint.contentVersionFloor == 7, "clean checkpoint retains both observed floors");
-	for (const auto pair : { std::pair{ 0, 0 }, std::pair{ 3, 7 }, std::pair{ 4, 6 } }) {
+	for (const auto &pair : { std::pair{ 0, 0 }, std::pair{ 3, 7 }, std::pair{ 4, 6 } }) {
 		const auto restored = ReadSessionSnapshot(Encode(snapshot), snapshot.telegramUserId);
 		auto restarted = SyncCoordinator();
 		Check(restarted.restoreCheckpoint(restored->checkpoint), "clean checkpoint restored after crash");

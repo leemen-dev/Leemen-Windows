@@ -8,6 +8,7 @@
 #include "leemen/sync_peer_id.h"
 #include "leemen/sync_service.h"
 #include "main/main_session.h"
+#include "main/main_account.h"
 #include "main/main_session_settings.h"
 
 #include <crl/crl_async.h>
@@ -74,7 +75,7 @@ bool PrivateSpace::enableSync() {
 		_state.setActive(false);
 	});
 	startSync();
-	return true;
+	return !_damaged;
 }
 
 void PrivateSpace::startSync() {
@@ -154,7 +155,9 @@ void PrivateSpace::startSync() {
 	}
 	_sync->changes() | rpl::on_next([=] { syncChanged(); }, _lifetime);
 	saveSync();
-	_sync->start();
+	if (!_damaged) {
+		_sync->start();
+	}
 }
 
 void PrivateSpace::saveSync() {
@@ -176,16 +179,29 @@ void PrivateSpace::saveSync() {
 			<< QString::fromStdString(stamp.device);
 	}
 	_session->settings().setLeemenSync(std::move(bytes));
-	_session->saveSettings();
+	persistProtection();
 }
 
 void PrivateSpace::syncChanged() {
+	if (_damaged) {
+		return;
+	}
 	if (_syncApplying) {
 		_syncChangePending = true;
 		return;
 	}
 	_syncApplying = true;
 	_syncChangePending = false;
+	if (_sync->state() == SyncService::State::AccountDeleted
+		&& !_syncDeletedLogoutScheduled) {
+		_syncDeletedLogoutScheduled = true;
+		crl::on_main(_session, [=] {
+			if (_sync && _sync->state() == SyncService::State::AccountDeleted
+				&& _session->account().maybeSession() == _session.get()) {
+				_session->account().forcedLogOut();
+			}
+		});
+	}
 	if (_sync->resetState() == SyncService::ResetState::Confirmed) {
 		auto done = std::move(_syncPinDone);
 		_syncPinDone = nullptr;
@@ -213,6 +229,13 @@ void PrivateSpace::syncChanged() {
 			_syncImportUnlockRequest = 0;
 			save();
 		});
+		if (_damaged) {
+			_syncApplying = false;
+			if (done) {
+				done(false);
+			}
+			return;
+		}
 		_sync->completeLocalReset();
 		saveSync();
 		_syncApplying = false;

@@ -595,7 +595,7 @@ void Account::writeMapQueued() {
 	});
 }
 
-void Account::writeMap() {
+void Account::writeMap(QByteArray *expectedPayload) {
 	Expects(_localKey != nullptr);
 
 	_writeMapTimer.cancel();
@@ -757,6 +757,9 @@ void Account::writeMap() {
 		for (const auto &[key, value] : _botStoragesMap) {
 			mapData.stream << quint64(value) << SerializePeerId(key);
 		}
+	}
+	if (expectedPayload) {
+		*expectedPayload = mapData.data.mid(sizeof(quint32));
 	}
 	map.writeEncrypted(mapData, _localKey);
 
@@ -1014,6 +1017,56 @@ void Account::writeSessionSettings() {
 	writeSessionSettings(nullptr);
 }
 
+bool Account::writeLeemenSettingsSync() {
+	const auto settings = _owner->getSessionSettings();
+	if (_readingUserSettings || !settings || settings->sessionSettingsReadFailed()) {
+		return false;
+	}
+	const auto expected = settings->serialize();
+	const auto createdSettingsKey = !_settingsKey;
+	auto expectedMap = QByteArray();
+	writeSessionSettings();
+	writeMap(&expectedMap);
+	details::Sync();
+	if (createdSettingsKey && expectedMap.isEmpty()) {
+		return false;
+	}
+	if (!expectedMap.isEmpty()) {
+		auto map = FileReadDescriptor();
+		if (!ReadFile(map, u"map"_q, _basePath)) {
+			return false;
+		}
+		auto salt = QByteArray();
+		auto key = QByteArray();
+		auto encrypted = QByteArray();
+		map.stream >> salt >> key >> encrypted;
+		auto contents = EncryptedDescriptor();
+		if (map.stream.status() != QDataStream::Ok || !map.stream.atEnd()
+			|| !DecryptLocal(contents, encrypted, _localKey)
+			|| contents.buffer.readAll() != expectedMap) {
+			return false;
+		}
+	}
+	auto file = FileReadDescriptor();
+	if (!ReadEncryptedFile(file, _settingsKey, _basePath, _localKey)) {
+		return false;
+	}
+	auto block = quint32();
+	auto size = qint64();
+	auto time = qint32();
+	file.stream >> block;
+	if (block != dbiCacheSettings) {
+		return false;
+	}
+	file.stream >> size >> time >> size >> time >> block;
+	if (file.stream.status() != QDataStream::Ok || block != dbiSessionSettings) {
+		return false;
+	}
+	auto actual = QByteArray();
+	file.stream >> actual;
+	return file.stream.status() == QDataStream::Ok && actual == expected;
+}
+
 void Account::writeSessionSettings(Main::SessionSettings *stored) {
 	if (_readingUserSettings) {
 		LOG(("App Error: attempt to write settings while reading them!"));
@@ -1029,6 +1082,9 @@ void Account::writeSessionSettings(Main::SessionSettings *stored) {
 	auto userDataInstance = stored
 		? stored
 		: _owner->getSessionSettings();
+	if (userDataInstance && userDataInstance->sessionSettingsReadFailed()) {
+		return;
+	}
 	auto userData = userDataInstance
 		? userDataInstance->serialize()
 		: QByteArray();
@@ -1070,10 +1126,18 @@ ReadSettingsContext Account::prepareReadSettingsContext() const {
 }
 
 std::unique_ptr<Main::SessionSettings> Account::readSessionSettings() {
+	const auto damaged = [] {
+		auto result = std::make_unique<Main::SessionSettings>();
+		result->markSessionSettingsReadFailed();
+		return result;
+	};
 	ReadSettingsContext context;
 	FileReadDescriptor userSettings;
 	if (!ReadEncryptedFile(userSettings, _settingsKey, _basePath, _localKey)) {
 		LOG(("App Info: could not read encrypted user settings..."));
+		if (_settingsKey) {
+			return damaged();
+		}
 
 		Local::readOldUserSettings(true, context);
 		auto result = applyReadContext(std::move(context));
@@ -1090,14 +1154,12 @@ std::unique_ptr<Main::SessionSettings> Account::readSessionSettings() {
 		userSettings.stream >> blockId;
 		if (!CheckStreamStatus(userSettings.stream)) {
 			_readingUserSettings = false;
-			writeSessionSettings();
-			return nullptr;
+			return damaged();
 		}
 
 		if (!ReadSetting(blockId, userSettings.stream, userSettings.version, context)) {
 			_readingUserSettings = false;
-			writeSessionSettings();
-			return nullptr;
+			return damaged();
 		}
 	}
 	_readingUserSettings = false;

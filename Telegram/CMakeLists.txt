@@ -1479,6 +1479,8 @@ PRIVATE
     leemen/leemen_private_accounts_box.h
     leemen/leemen_entry_shortcut.cpp
     leemen/leemen_entry_shortcut.h
+    leemen/leemen_account_box.cpp
+    leemen/leemen_account_box.h
     leemen/leemen_private_messages_box.cpp
     leemen/leemen_private_messages_box.h
     leemen/private_message_policy.h
@@ -1515,6 +1517,10 @@ PRIVATE
     leemen/sync_service.h
     leemen/sync_session_snapshot.cpp
     leemen/sync_session_snapshot.h
+    leemen/realtime_protocol.cpp
+    leemen/realtime_protocol.h
+    leemen/sync_realtime.cpp
+    leemen/sync_realtime.h
     main/main_session.cpp
     main/main_session.h
     main/main_session_settings.cpp
