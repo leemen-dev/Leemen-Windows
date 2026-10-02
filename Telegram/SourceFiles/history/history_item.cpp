@@ -32,6 +32,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "storage/file_upload.h"
 #include "storage/storage_shared_media.h"
 #include "main/main_session.h"
+#include "leemen/leemen_private_space.h"
 #include "main/main_app_config.h"
 #include "main/main_session_settings.h"
 #include "menu/menu_ttl_validator.h"
@@ -57,6 +58,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "data/data_saved_sublist.h"
 #include "data/data_changes.h"
 #include "data/data_session.h"
+#include "data/data_groups.h"
 #include "data/data_message_reactions.h"
 #include "data/data_folder.h"
 #include "data/data_forum.h"
@@ -4002,7 +4004,7 @@ bool HistoryItem::hasHiddenLinks() const {
 }
 
 TextForMimeData HistoryItem::clipboardText() const {
-	return isService()
+	return (isService() || isHiddenSavedMessage())
 		? TextForMimeData()
 		: TextForMimeData::WithExpandedLinks(translatedText());
 }
@@ -4714,6 +4716,32 @@ PeerId HistoryItem::sublistPeerId() const {
 	return PeerId();
 }
 
+bool HistoryItem::isHiddenSavedMessage() const {
+	if (!_history->peer->isSelf()) {
+		return false;
+	}
+	const auto &space = _history->session().leemen();
+	if (!space.configured() || space.active()) {
+		return false;
+	}
+	const auto hiddenSource = [&](not_null<const HistoryItem*> item) {
+		if (!item->history()->peer->isSelf()) {
+			return false;
+		}
+		const auto saved = item->Get<HistoryMessageSaved>();
+		const auto source = saved ? saved->savedSourcePeerId : PeerId();
+		return source
+			&& source != _history->peer->id
+			&& source != PeerData::kSavedHiddenAuthorId
+			&& !space.allowsPeer(source);
+	};
+	if (hiddenSource(this)) {
+		return true;
+	}
+	const auto group = _history->owner().groups().find(this);
+	return group && ranges::any_of(group->items, hiddenSource);
+}
+
 PeerData *HistoryItem::savedFromSender() const {
 	if (const auto forwarded = Get<HistoryMessageForwarded>()) {
 		return forwarded->savedFromSender;
@@ -4730,6 +4758,9 @@ const HiddenSenderInfo *HistoryItem::savedFromHiddenSenderInfo() const {
 
 TextWithEntities HistoryItem::notificationText(
 		NotificationTextOptions options) const {
+	if (isHiddenSavedMessage()) {
+		return {};
+	}
 	auto result = [&] {
 		if (_media && !isService()) {
 			return _media->notificationText();
@@ -4754,6 +4785,9 @@ TextWithEntities HistoryItem::notificationText(
 }
 
 ItemPreview HistoryItem::toPreview(ToPreviewOptions options) const {
+	if (isHiddenSavedMessage()) {
+		return {};
+	}
 	if (isService()) {
 		const_cast<HistoryItem*>(this)->resolveDependent();
 
@@ -4945,6 +4979,9 @@ void HistoryItem::createComponents(CreateConfig &&config) {
 	UpdateComponents(mask);
 
 	if (const auto saved = Get<HistoryMessageSaved>()) {
+		saved->savedSourcePeerId = config.savedSublistPeer
+			? config.savedSublistPeer
+			: config.savedFromPeer;
 		if (!config.savedSublistPeer) {
 			if (config.reply.monoforumPeerId) {
 				config.savedSublistPeer = config.reply.monoforumPeerId;
@@ -5879,6 +5916,7 @@ void HistoryItem::createServiceFromMtp(const MTPDmessageService &message) {
 		&& (savedSublistPeer || requiresMonoforumPeer)) {
 		AddComponents(HistoryMessageSaved::Bit());
 		const auto saved = Get<HistoryMessageSaved>();
+		saved->savedSourcePeerId = savedSublistPeer;
 		saved->sublistPeerId = savedSublistPeer
 			? savedSublistPeer
 			: _from->id;

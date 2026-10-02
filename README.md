@@ -1,20 +1,19 @@
-# [Telegram Desktop][telegram_desktop] – Official Messenger
+# Leemen for Windows
 
-This is the complete source code and the build instructions for the official [Telegram][telegram] messenger desktop client, based on the [Telegram API][telegram_api] and the [MTProto][telegram_proto] secure protocol.
+Leemen for Windows is a fork of [Telegram Desktop][telegram_desktop], using the [Telegram API][telegram_api] and [MTProto][telegram_proto]. This repository contains source code and build instructions; it is not an official Telegram client.
 
-[![Version](https://badge.fury.io/gh/telegramdesktop%2Ftdesktop.svg)](https://github.com/telegramdesktop/tdesktop/releases)
-[![Build Status](https://github.com/telegramdesktop/tdesktop/workflows/Windows./badge.svg)](https://github.com/telegramdesktop/tdesktop/actions)
-[![Build Status](https://github.com/telegramdesktop/tdesktop/workflows/MacOS./badge.svg)](https://github.com/telegramdesktop/tdesktop/actions)
-[![Build Status](https://github.com/telegramdesktop/tdesktop/workflows/Linux./badge.svg)](https://github.com/telegramdesktop/tdesktop/actions)
-[![Built with Depot](https://img.shields.io/badge/Built%20with-Depot.dev-46A75A)](https://depot.dev)
+[![Windows build](https://github.com/leemen-dev/Leemen-Windows/actions/workflows/win.yml/badge.svg)](https://github.com/leemen-dev/Leemen-Windows/actions/workflows/win.yml)
+[![Portable core tests](https://github.com/leemen-dev/Leemen-Windows/actions/workflows/leemen-core-tests.yml/badge.svg)](https://github.com/leemen-dev/Leemen-Windows/actions/workflows/leemen-core-tests.yml)
+
+The local Private Space preview is under development and enrollment is disabled by default. It is not ready for sensitive conversations and does not sync with Leemen Android. See [the preview build and test instructions](docs/building-win.md#leemen-private-space-preview). The inherited Telegram download links below do not contain Leemen features.
 
 [![Preview of Telegram Desktop][preview_image]][preview_image_url]
 
 The source code is published under GPLv3 with OpenSSL exception, the license is available [here][license].
 
-## Supported systems
+## Upstream Telegram downloads
 
-The latest version is available for
+Official Telegram Desktop builds are available for
 
 * [Windows 7 and above (64 bit)](https://telegram.org/dl/desktop/win64) ([portable](https://telegram.org/dl/desktop/win64_portable))
 * [Windows 7 and above (32 bit)](https://telegram.org/dl/desktop/win) ([portable](https://telegram.org/dl/desktop/win_portable))

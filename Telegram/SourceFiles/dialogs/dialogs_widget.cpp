@@ -57,6 +57,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "mainwidget.h"
 #include "main/main_domain.h"
 #include "main/main_session.h"
+#include "leemen/leemen_private_space.h"
 #include "main/main_session_settings.h"
 #include "api/api_authorizations.h"
 #include "api/api_chat_filters.h"
@@ -431,6 +432,14 @@ Widget::Widget(
 , _searchTimer([=] { search(); })
 , _peerSearch(&controller->session(), Api::PeerSearch::Type::WithSponsored)
 , _singleMessageSearch(&controller->session()) {
+	session().leemen().changes(
+	) | rpl::on_next([=] {
+		_suggestions = nullptr;
+		_hidingSuggestions.clear();
+		_search->clear();
+		updateSuggestions(anim::type::instant);
+	}, lifetime());
+
 	const auto makeChildListShown = [](PeerId peerId, float64 shown) {
 		return InnerWidget::ChildListShown{ peerId, shown };
 	};

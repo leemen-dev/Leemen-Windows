@@ -7,6 +7,8 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "main/main_session.h"
 
+#include "leemen/leemen_private_space.h"
+
 #include "apiwrap.h"
 #include "api/api_peer_colors.h"
 #include "api/api_updates.h"
@@ -103,6 +105,7 @@ Session::Session(
 : _userId(user.c_user().vid())
 , _account(account)
 , _settings(std::move(settings))
+, _leemen(std::make_unique<Leemen::PrivateSpace>(this))
 , _changes(std::make_unique<Data::Changes>(this))
 , _api(std::make_unique<ApiWrap>(this))
 , _updates(std::make_unique<Api::Updates>(this))
@@ -181,6 +184,8 @@ Session::Session(
 , _fastButtonsBots(std::make_unique<Support::FastButtonsBots>(this))
 , _saveSettingsTimer([=] { saveSettings(); }) {
 	Expects(_settings != nullptr);
+
+	_leemen->start();
 
 	_api->requestTermsUpdate();
 	_api->requestFullPeer(_user);

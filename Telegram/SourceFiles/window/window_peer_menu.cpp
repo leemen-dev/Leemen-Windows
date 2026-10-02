@@ -25,6 +25,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "api/api_communities.h"
 #include "api/api_global_privacy.h"
 #include "lang/lang_keys.h"
+#include "leemen/leemen_private_space.h"
 #include "lottie/lottie_icon.h"
 #include "ui/boxes/confirm_box.h"
 #include "base/random.h"
@@ -4346,6 +4347,18 @@ void FillDialogsEntryMenu(
 		Dialogs::EntryState request,
 		const PeerMenuCallback &callback) {
 	Filler(controller, request, callback).fill();
+	const auto peer = request.key.peer();
+	if (peer
+		&& controller->session().leemen().active()
+		&& controller->session().leemen().canHide(peer->id)) {
+		const auto hide = !controller->session().leemen().hidden(peer->id);
+		callback(hide
+			? tr::lng_leemen_hide_chat(tr::now)
+			: tr::lng_leemen_reveal_chat(tr::now), [=] {
+			controller->session().leemen().setHidden(peer->id, hide);
+		}, &st::menuIconLock);
+	}
+
 }
 
 bool FillVideoChatMenu(

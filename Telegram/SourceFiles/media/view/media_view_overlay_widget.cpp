@@ -102,6 +102,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "main/main_account.h"
 #include "main/main_domain.h" // Domain::activeSessionValue.
 #include "main/main_session.h"
+#include "leemen/leemen_private_space.h"
 #include "main/main_session_settings.h"
 #include "layout/layout_document_generic_preview.h"
 #include "platform/platform_overlay_widget.h"
@@ -4517,6 +4518,21 @@ void OverlayWidget::activate() {
 
 void OverlayWidget::show(OpenRequest request) {
 	const auto story = request.story();
+	if (story && !story->session().leemen().allowsPeer(story->peer()->id)) {
+		return;
+	}
+	if (const auto peer = request.peer()) {
+		if (!peer->session().leemen().allowsPeer(peer->id)) {
+			return;
+		}
+	}
+	if (const auto item = request.item()) {
+		if (!item->history()->session().leemen().allowsPeer(
+				item->history()->peer->id)
+			|| item->isHiddenSavedMessage()) {
+			return;
+		}
+	}
 	const auto document = story ? story->document() : request.document();
 	const auto photo = story ? story->photo() : request.photo();
 	const auto call = story ? story->call() : request.call();
@@ -5880,6 +5896,10 @@ void OverlayWidget::storiesJumpTo(
 		Data::StoriesContext context) {
 	Expects(_stories != nullptr);
 	Expects(id.valid());
+	if (!session->leemen().allowsPeer(id.peer)) {
+		close();
+		return;
+	}
 
 	const auto maybeStory = session->data().stories().lookup(id);
 	if (!maybeStory) {
@@ -5907,6 +5927,10 @@ void OverlayWidget::storiesJumpTo(
 
 void OverlayWidget::storiesRedisplay(not_null<Data::Story*> story) {
 	Expects(_stories != nullptr);
+	if (!story->session().leemen().allowsPeer(story->peer()->id)) {
+		close();
+		return;
+	}
 
 	clearStreaming();
 	_streamingStartPaused = false;
@@ -7712,8 +7736,14 @@ OverlayWidget::Entity OverlayWidget::entityForCollage(int index) const {
 
 OverlayWidget::Entity OverlayWidget::entityForItemId(const FullMsgId &itemId) const {
 	Expects(_session != nullptr);
+	if (!_session->leemen().allowsPeer(itemId.peer)) {
+		return { v::null, nullptr };
+	}
 
 	if (const auto item = _session->data().message(itemId)) {
+		if (item->isHiddenSavedMessage()) {
+			return { v::null, nullptr };
+		}
 		if (const auto media = item->media()) {
 			if (const auto photo = media->photo()) {
 				return { photo, item, _topicRootId, _monoforumPeerId };
@@ -7914,6 +7944,11 @@ bool OverlayWidget::moveToEntity(const Entity &entity, int preloadDelta) {
 		return false;
 	}
 	if (const auto item = entity.item) {
+		if (!item->history()->session().leemen().allowsPeer(
+				item->history()->peer->id)
+			|| item->isHiddenSavedMessage()) {
+			return false;
+		}
 		setContext(ItemContext{
 			item,
 			entity.topicRootId,

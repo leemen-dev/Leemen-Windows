@@ -12,6 +12,8 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "data/data_msg_id.h"
 #include "iv/iv_rich_page.h"
 
+#include <atomic>
+
 class DocumentData;
 class HistoryInner;
 class HistoryItem;
@@ -91,6 +93,7 @@ private:
 	void finalize();
 	void fail();
 	void cancelFromManager();
+	void cancelForPrivacy();
 	void stopJobs();
 	void cleanupFiles();
 	void showDoneToast();
@@ -103,6 +106,8 @@ private:
 	const QString _basePath;
 	const base::weak_ptr<Window::SessionController> _controller;
 	const Fn<void()> _finished;
+	const std::shared_ptr<std::atomic<bool>> _cancelled
+		= std::make_shared<std::atomic<bool>>(false);
 
 	QString _title;
 	QString _folder;

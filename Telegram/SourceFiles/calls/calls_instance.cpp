@@ -21,6 +21,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "main/session/session_show.h"
 #include "main/main_app_config.h"
 #include "main/main_session.h"
+#include "leemen/leemen_private_space.h"
 #include "main/main_account.h"
 #include "apiwrap.h"
 #include "lang/lang_keys.h"
@@ -203,6 +204,9 @@ Instance::~Instance() {
 void Instance::startOutgoingCall(
 		not_null<UserData*> user,
 		StartOutgoingCallArgs args) {
+	if (user->session().leemen().hidden(user->id)) {
+		return;
+	}
 	if (activateCurrentCall()
 		|| (!args.isConfirmed && activateUnconfirmedCall(user))) {
 		return;
@@ -229,6 +233,9 @@ void Instance::startOrJoinGroupCall(
 		std::shared_ptr<Ui::Show> show,
 		not_null<PeerData*> peer,
 		StartGroupCallArgs args) {
+	if (peer->session().leemen().hidden(peer->id)) {
+		return;
+	}
 	confirmLeaveCurrent(show, peer, args, [=](StartGroupCallArgs args) {
 		using JoinConfirm = Calls::StartGroupCallArgs::JoinConfirm;
 		const auto context = (args.confirm == JoinConfirm::Always)
@@ -425,6 +432,9 @@ void Instance::createCall(
 		not_null<UserData*> user,
 		CallType type,
 		StartOutgoingCallArgs args) {
+	if (user->session().leemen().hidden(user->id)) {
+		return;
+	}
 	struct Performer final {
 		explicit Performer(Fn<void(bool, bool, const Performer &)> callback)
 		: callback(std::move(callback)) {
@@ -435,6 +445,9 @@ void Instance::createCall(
 			bool video,
 			bool isConfirmed,
 			const Performer &repeater) {
+		if (user->session().leemen().hidden(user->id)) {
+			return;
+		}
 		const auto delegate = _delegate.get();
 		auto call = std::make_unique<Call>(delegate, user, type, video);
 		if (isConfirmed) {
@@ -490,6 +503,9 @@ void Instance::destroyGroupCall(not_null<GroupCall*> call) {
 void Instance::createGroupCall(
 		Group::JoinInfo info,
 		const MTPInputGroupCall &inputCall) {
+	if (info.peer->session().leemen().hidden(info.peer->id)) {
+		return;
+	}
 	destroyCurrentCall();
 
 	auto call = std::make_unique<GroupCall>(
@@ -678,6 +694,9 @@ void Instance::handleCallUpdate(
 		const MTPPhoneCall &call) {
 	if (call.type() == mtpc_phoneCallRequested) {
 		auto &phoneCall = call.c_phoneCallRequested();
+		if (session->leemen().hidden(peerFromUser(phoneCall.vadmin_id()))) {
+			return;
+		}
 		auto user = session->data().userLoaded(phoneCall.vadmin_id());
 		if (!user) {
 			LOG(("API Error: User not loaded for phoneCallRequested."));

@@ -32,6 +32,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "iv/markdown/iv_markdown_prepare_serialize.h"
 #include "iv/iv_instance.h"
 #include "lang/lang_keys.h"
+#include "leemen/leemen_private_space.h"
 #include "main/main_session.h"
 #include "ui/image/image.h"
 #include "ui/style/style_core.h"
@@ -63,6 +64,17 @@ constexpr auto kMaxFolderNameLength = 48;
 constexpr auto kMinBytesForDownloadsEntry = int64(10) * 1024 * 1024;
 constexpr auto kClipboardMediaLimit = int64(4) * 1024 * 1024;
 constexpr auto kClipboardFormulaLimit = int64(2) * 1024 * 1024;
+
+[[nodiscard]] bool CanExportRichMessage(
+		not_null<Main::Session*> session,
+		FullMsgId itemId) {
+	if ((session->leemen().configured() && !session->leemen().active())
+		|| !session->leemen().allowsPeer(itemId.peer)) {
+		return false;
+	}
+	const auto item = session->data().message(itemId);
+	return item && !item->isHiddenSavedMessage();
+}
 
 [[nodiscard]] QString TgMediaSource(
 		RichPage::BlockKind kind,
@@ -1612,6 +1624,7 @@ RichMessageHtmlExport::~RichMessageHtmlExport() {
 		return;
 	}
 	_settled = true;
+	_cancelled->store(true);
 	stopJobs();
 	if (_registered && _fakeItem) {
 		Core::App().downloadManager().removeLoadingExternal(_fakeItem);
@@ -1624,6 +1637,18 @@ not_null<Main::Session*> RichMessageHtmlExport::session() const {
 }
 
 void RichMessageHtmlExport::start() {
+	if (_settled) {
+		return;
+	} else if (!CanExportRichMessage(_session, _itemId)) {
+		cancelForPrivacy();
+		return;
+	}
+	_session->leemen().changes(
+	) | rpl::filter([=] {
+		return !CanExportRichMessage(_session, _itemId);
+	}) | rpl::on_next([=] {
+		cancelForPrivacy();
+	}, _downloadLifetime);
 	if (!chooseFolder()) {
 		fail();
 		return;
@@ -1634,11 +1659,17 @@ void RichMessageHtmlExport::start() {
 		return;
 	}
 	registerLoading();
+	if (_settled) {
+		return;
+	}
 	if (_jobs.empty()) {
 		finalize();
 		return;
 	}
 	startJobs();
+	if (_settled) {
+		return;
+	}
 	_session->downloaderTaskFinished(
 	) | rpl::on_next([=] {
 		checkJobs();
@@ -1838,17 +1869,20 @@ void RichMessageHtmlExport::registerLoading() {
 		total);
 	auto &manager = Core::App().downloadManager();
 	_fakeItem = manager.generateExternalItem(_fakeDocument);
+	_registered = true;
 	manager.addLoadingExternal(
 		{ .item = _fakeItem, .document = _fakeDocument },
 		_folder,
 		total,
 		crl::guard(this, [=] { cancelFromManager(); }));
-	_registered = true;
 }
 
 void RichMessageHtmlExport::startJobs() {
 	const auto origin = ::Data::FileOrigin(_itemId);
 	for (auto &job : _jobs) {
+		if (_settled) {
+			return;
+		}
 		if (job.photo) {
 			job.photoMedia = job.photo->createMediaView();
 			job.photoMedia->wanted(::Data::PhotoSize::Large, origin);
@@ -1865,8 +1899,9 @@ void RichMessageHtmlExport::startDocumentJob(MediaJob &job) {
 		job.copying = true;
 		const auto weak = base::make_weak(this);
 		const auto relative = job.relative;
+		const auto cancelled = _cancelled;
 		crl::async([=] {
-			const auto ok = QFile::copy(existing, target);
+			const auto ok = !cancelled->load() && QFile::copy(existing, target);
 			crl::on_main(weak, [=] {
 				finishCopy(relative, ok);
 			});
@@ -1877,6 +1912,9 @@ void RichMessageHtmlExport::startDocumentJob(MediaJob &job) {
 }
 
 void RichMessageHtmlExport::finishCopy(const QString &relative, bool ok) {
+	if (_settled) {
+		return;
+	}
 	for (auto &job : _jobs) {
 		if (job.relative == relative) {
 			job.copying = false;
@@ -1889,6 +1927,9 @@ void RichMessageHtmlExport::finishCopy(const QString &relative, bool ok) {
 
 void RichMessageHtmlExport::checkJobs() {
 	if (_settled) {
+		return;
+	} else if (!CanExportRichMessage(_session, _itemId)) {
+		cancelForPrivacy();
 		return;
 	}
 	auto pending = false;
@@ -1958,6 +1999,9 @@ void RichMessageHtmlExport::updateProgress() {
 
 void RichMessageHtmlExport::finalize() {
 	if (_settled) {
+		return;
+	} else if (!CanExportRichMessage(_session, _itemId)) {
+		cancelForPrivacy();
 		return;
 	}
 	_settled = true;
@@ -2086,10 +2130,26 @@ void RichMessageHtmlExport::cancelFromManager() {
 		return;
 	}
 	_settled = true;
+	_cancelled->store(true);
 	_timer.cancel();
 	_downloadLifetime.destroy();
 	stopJobs();
 	cleanupFiles();
+	notifyFinished();
+}
+
+void RichMessageHtmlExport::cancelForPrivacy() {
+	if (_settled) {
+		return;
+	}
+	_settled = true;
+	_cancelled->store(true);
+	_timer.cancel();
+	_downloadLifetime.destroy();
+	if (base::take(_registered) && _fakeItem) {
+		Core::App().downloadManager().removeLoadingExternal(_fakeItem);
+	}
+	stopJobs();
 	notifyFinished();
 }
 
@@ -2113,6 +2173,9 @@ void RichMessageHtmlExport::cleanupFiles() {
 }
 
 void RichMessageHtmlExport::showDoneToast() {
+	if (!CanExportRichMessage(_session, _itemId)) {
+		return;
+	}
 	const auto strong = _controller.get();
 	const auto controller = strong
 		? strong
@@ -2121,11 +2184,17 @@ void RichMessageHtmlExport::showDoneToast() {
 		return;
 	}
 	const auto path = _htmlPath;
-	const auto filter = [path](const auto ...) {
-		File::ShowInFolder(path);
+	const auto session = base::make_weak(_session.get());
+	const auto itemId = _itemId;
+	const auto filter = [path, session, itemId](const auto ...) {
+		if (const auto strong = session.get()) {
+			if (CanExportRichMessage(strong, itemId)) {
+				File::ShowInFolder(path);
+			}
+		}
 		return false;
 	};
-	controller->showToast({
+	const auto toast = controller->showToast({
 		.text = tr::lng_export_html_saved_to(
 			tr::now,
 			lt_downloads,
@@ -2138,9 +2207,23 @@ void RichMessageHtmlExport::showDoneToast() {
 		.iconLottieSize = st::toastLottieIconSize,
 		.st = &st::defaultToast,
 	});
+	if (const auto instance = toast.get()) {
+		_session->leemen().changes(
+		) | rpl::on_next([session, itemId, toast] {
+			const auto strong = session.get();
+			if (!strong || !CanExportRichMessage(strong, itemId)) {
+				if (const auto instance = toast.get()) {
+					instance->hide();
+				}
+			}
+		}, instance->widget()->lifetime());
+	}
 }
 
 void RichMessageHtmlExport::showFailToast() {
+	if (!CanExportRichMessage(_session, _itemId)) {
+		return;
+	}
 	const auto strong = _controller.get();
 	const auto controller = strong
 		? strong
@@ -2165,12 +2248,19 @@ void AddSaveRichMessageHtmlActionForItem(
 		not_null<Window::SessionController*> controller,
 		not_null<HistoryItem*> item,
 		Fn<void()> done) {
-	if (!item->richPage() || item->forbidsForward()) {
+	if (!item->richPage()
+		|| item->forbidsForward()
+		|| !CanExportRichMessage(&item->history()->session(), item->fullId())) {
 		return;
 	}
 	const auto itemId = item->fullId();
+	const auto weak = base::make_weak(controller.get());
 	menu->addAction(tr::lng_context_save_html(tr::now), [=] {
-		Core::App().iv().exportRichMessageHtml(controller, itemId);
+		const auto strong = weak.get();
+		if (!strong || !CanExportRichMessage(&strong->session(), itemId)) {
+			return;
+		}
+		Core::App().iv().exportRichMessageHtml(strong, itemId);
 		if (done) {
 			done();
 		}

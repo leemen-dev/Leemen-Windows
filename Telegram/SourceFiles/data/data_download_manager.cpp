@@ -19,6 +19,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "base/unixtime.h"
 #include "base/random.h"
 #include "main/main_session.h"
+#include "leemen/leemen_private_space.h"
 #include "main/main_account.h"
 #include "lang/lang_keys.h"
 #include "storage/storage_account.h"
@@ -45,6 +46,32 @@ namespace {
 constexpr auto kClearLoadingTimeout = 5 * crl::time(1000);
 constexpr auto kMaxFileSize = 4000 * int64(1024 * 1024);
 constexpr auto kMaxResolvePerAttempt = 100;
+
+[[nodiscard]] bool VisibleDownload(const DownloadObject &object) {
+	const auto history = object.item->history();
+	const auto &space = history->session().leemen();
+	if (space.configured()
+		&& !space.active()
+		&& history->peer->isSelf()
+		&& !object.item->isHistoryEntry()) {
+		return false;
+	}
+	return !object.item->isHiddenSavedMessage()
+		&& space.allowsPeer(history->peer->id);
+}
+
+[[nodiscard]] bool VisibleDownload(
+		not_null<Main::Session*> session,
+		const DownloadedId &id) {
+	if (session->leemen().configured()
+		&& !session->leemen().active()
+		&& id.itemId.peer == session->userPeerId()
+		&& (!id.object || !id.object->item->isHistoryEntry())) {
+		return false;
+	}
+	return session->leemen().allowsPeer(id.itemId.peer)
+		&& (!id.object || VisibleDownload(*id.object));
+}
 
 constexpr auto ByItem = [](const auto &entry) {
 	if constexpr (std::is_same_v<decltype(entry), const DownloadingId&>) {
@@ -162,7 +189,11 @@ DownloadManager::~DownloadManager() = default;
 
 bool DownloadManager::empty() const {
 	for (const auto &[session, data] : _sessions) {
-		if (!data.downloading.empty() || !data.downloaded.empty()) {
+		if (ranges::any_of(data.downloading, [](const DownloadingId &id) {
+			return VisibleDownload(id.object);
+		}) || ranges::any_of(data.downloaded, [&](const DownloadedId &id) {
+			return VisibleDownload(session, id);
+		})) {
 			return false;
 		}
 	}
@@ -173,6 +204,12 @@ void DownloadManager::trackSession(not_null<Main::Session*> session) {
 	auto &data = _sessions.emplace(session, SessionData()).first->second;
 	data.downloaded = deserialize(session);
 	data.resolveNeeded = data.downloaded.size();
+
+	session->leemen().changes(
+	) | rpl::on_next([=] {
+		_visibilityChanges.fire({});
+		_loadingListChanges.fire({});
+	}, data.lifetime);
 
 	session->data().documentLoadProgress(
 	) | rpl::filter([=](not_null<DocumentData*> document) {
@@ -541,6 +578,9 @@ void DownloadManager::deleteFiles(const std::vector<GlobalMsgId> &ids) {
 	auto descriptor = DeleteFilesDescriptor();
 	for (const auto &id : ids) {
 		if (const auto item = MessageByGlobalId(id)) {
+			if (!VisibleDownload(DownloadObject{ .item = item })) {
+				continue;
+			}
 			const auto session = &item->history()->session();
 			const auto i = _sessions.find(session);
 			if (i == end(_sessions)) {
@@ -598,10 +638,33 @@ void DownloadManager::deleteAll() {
 			continue;
 		}
 		const auto sessionUniqueId = session->uniqueId();
-		while (!data.downloading.empty()) {
-			cancel(data, data.downloading.end() - 1);
+		while (true) {
+			const auto i = ranges::find_if(data.downloading, [](const auto &id) {
+				return VisibleDownload(id.object);
+			});
+			if (i == end(data.downloading)) {
+				break;
+			}
+			cancel(data, i);
 		}
+		auto removed = std::vector<DownloadedId>();
+		const auto resolveNeeded = base::take(data.resolveNeeded);
+		const auto resolveSentFrom = resolveNeeded
+			- base::take(data.resolveSentTotal);
+		auto index = 0;
 		for (auto &id : base::take(data.downloaded)) {
+			if (VisibleDownload(session, id)) {
+				removed.push_back(std::move(id));
+			} else {
+				data.downloaded.push_back(std::move(id));
+				if (index < resolveNeeded) {
+					++data.resolveNeeded;
+					data.resolveSentTotal += (index >= resolveSentFrom) ? 1 : 0;
+				}
+			}
+			++index;
+		}
+		for (auto &id : removed) {
 			const auto object = id.object.get();
 			const auto document = object ? object->document : nullptr;
 			descriptor.files.emplace(id.path, DocumentDescriptor{
@@ -626,6 +689,33 @@ void DownloadManager::deleteAll() {
 }
 
 void DownloadManager::finishFilesDelete(DeleteFilesDescriptor &&descriptor) {
+	auto retainedPaths = QStringList();
+	for (const auto &[session, data] : _sessions) {
+		for (const auto &id : data.downloaded) {
+			retainedPaths.push_back(QDir::cleanPath(
+				QFileInfo(id.path).absoluteFilePath()).toCaseFolded());
+		}
+	}
+	ranges::sort(retainedPaths);
+	for (auto i = descriptor.files.begin(); i != descriptor.files.end();) {
+		const auto path = QDir::cleanPath(
+			QFileInfo(i->first).absoluteFilePath()).toCaseFolded();
+		const auto folder = RichExportFolderToRemove(i->first);
+		const auto prefix = folder.isEmpty()
+			? QString()
+			: QDir::cleanPath(
+				QFileInfo(folder).absoluteFilePath()).toCaseFolded() + '/';
+		const auto nested = ranges::lower_bound(retainedPaths, prefix);
+		const auto retained = ranges::binary_search(retainedPaths, path)
+			|| (!prefix.isEmpty()
+				&& nested != end(retainedPaths)
+				&& nested->startsWith(prefix));
+		if (retained) {
+			i = descriptor.files.erase(i);
+		} else {
+			++i;
+		}
+	}
 	for (const auto &session : descriptor.sessions) {
 		writePostponed(session);
 	}
@@ -657,6 +747,9 @@ void DownloadManager::finishFilesDelete(DeleteFilesDescriptor &&descriptor) {
 bool DownloadManager::loadedHasNonCloudFile() const {
 	for (const auto &[session, data] : _sessions) {
 		for (const auto &id : data.downloaded) {
+			if (!VisibleDownload(session, id)) {
+				continue;
+			}
 			if (const auto object = id.object.get()) {
 				if (!object->item->isHistoryEntry()) {
 					return true;
@@ -674,23 +767,39 @@ auto DownloadManager::loadingList() const
 	) | ranges::views::transform([=](const auto &pair) {
 		return ranges::views::all(
 			pair.second.downloading
-		) | ranges::views::transform([](const DownloadingId &id) {
+		) | ranges::views::filter([](const DownloadingId &id) {
+			return VisibleDownload(id.object);
+		}) | ranges::views::transform([](const DownloadingId &id) {
 			return &id;
 		});
 	}) | ranges::views::join;
 }
 
 DownloadProgress DownloadManager::loadingProgress() const {
-	return _loadingProgress.current();
+	auto result = DownloadProgress();
+	for (const auto id : loadingList()) {
+		result.ready += id->ready;
+		result.total += id->total;
+	}
+	return result;
 }
 
 rpl::producer<> DownloadManager::loadingListChanges() const {
 	return _loadingListChanges.events();
 }
 
+rpl::producer<> DownloadManager::visibilityChanges() const {
+	return _visibilityChanges.events();
+}
+
 auto DownloadManager::loadingProgressValue() const
 -> rpl::producer<DownloadProgress> {
-	return _loadingProgress.value();
+	return rpl::merge(
+		_loadingProgress.value() | rpl::to_empty,
+		visibilityChanges()
+	) | rpl::map([=] {
+		return loadingProgress();
+	});
 }
 
 bool DownloadManager::loadingInProgress(Main::Session *onlyInSession) const {
@@ -804,8 +913,8 @@ auto DownloadManager::loadedList()
 	) | ranges::views::transform([=](const auto &pair) {
 		return ranges::views::all(
 			pair.second.downloaded
-		) | ranges::views::filter([](const DownloadedId &id) {
-			return (id.object != nullptr);
+		) | ranges::views::filter([session = pair.first](const DownloadedId &id) {
+			return (id.object != nullptr) && VisibleDownload(session, id);
 		}) | ranges::views::transform([](const DownloadedId &id) {
 			return &id;
 		});
@@ -896,7 +1005,8 @@ void DownloadManager::resolveRequestsFinished(
 		not_null<Main::Session*> session,
 		SessionData &data) {
 	const auto &owner = session->data();
-	for (; data.resolveSentTotal > 0; --data.resolveSentTotal) {
+	while (data.resolveSentTotal > 0) {
+		--data.resolveSentTotal;
 		const auto i = begin(data.downloaded) + (--data.resolveNeeded);
 		if (i->path.isEmpty()) {
 			data.downloaded.erase(i);
@@ -974,7 +1084,11 @@ void DownloadManager::generateEntry(
 
 auto DownloadManager::loadedAdded() const
 -> rpl::producer<not_null<const DownloadedId*>> {
-	return _loadedAdded.events();
+	return _loadedAdded.events() | rpl::filter([](const auto id) {
+		return id->object && VisibleDownload(
+			&id->object->item->history()->session(),
+			*id);
+	});
 }
 
 auto DownloadManager::loadedRemoved() const
@@ -1374,7 +1488,12 @@ rpl::producer<Ui::DownloadBarContent> MakeDownloadBarContent() {
 					++content.done;
 				}
 			}
-			if (content.count == 1) {
+			if (content.count != 1) {
+				state->downloadTaskLifetime.destroy();
+				state->document = nullptr;
+				state->media = nullptr;
+				state->thumbnail = QImage();
+			} else {
 				const auto document = single->document;
 				const auto thumbnailed = (single->item
 					&& document->hasThumbnail())
@@ -1412,6 +1531,9 @@ rpl::producer<Ui::DownloadBarContent> MakeDownloadBarContent() {
 		) | rpl::filter([=] {
 			return !state->scheduled;
 		}) | rpl::on_next(state->push, lifetime);
+
+		manager.visibilityChanges(
+		) | rpl::on_next(notify, lifetime);
 
 		notify();
 		return lifetime;

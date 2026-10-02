@@ -27,6 +27,9 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "info/peer_gifts/info_peer_gifts_widget.h"
 #include "info/stories/info_stories_widget.h"
 #include "info/info_memento.h"
+#include "info/info_content_widget.h"
+#include "history/view/history_view_pinned_section.h"
+#include "history/admin_log/history_admin_log_section.h"
 #include "info/info_controller.h"
 #include "inline_bots/bot_attach_web_view.h"
 #include "history/history.h"
@@ -103,6 +106,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "main/main_app_config.h"
 #include "main/main_domain.h"
 #include "main/main_session.h"
+#include "leemen/leemen_private_space.h"
 #include "main/main_session_settings.h"
 #include "lang/lang_keys.h"
 #include "apiwrap.h"
@@ -601,6 +605,9 @@ void SessionNavigation::resolveChannelById(
 void SessionNavigation::showMessageByLinkResolved(
 		not_null<HistoryItem*> item,
 		const PeerByLinkInfo &info) {
+	if (item->isHiddenSavedMessage()) {
+		return;
+	}
 	auto params = SectionShow{
 		SectionShow::Way::Forward
 	};
@@ -621,6 +628,9 @@ void SessionNavigation::showMessageByLinkResolved(
 void SessionNavigation::showPeerByLinkResolved(
 		not_null<PeerData*> peer,
 		const PeerByLinkInfo &info) {
+	if (!peer->session().leemen().allowsPeer(peer->id)) {
+		return;
+	}
 	auto params = SectionShow{
 		SectionShow::Way::Forward
 	};
@@ -1236,6 +1246,9 @@ void SessionNavigation::showRepliesForMessage(
 		MsgId rootId,
 		MsgId commentId,
 		const SectionShow &params) {
+	if (!history->session().leemen().allowsPeer(history->peer->id)) {
+		return;
+	}
 	if (const auto topic = history->peer->forumTopicFor(rootId)) {
 		auto replies = topic->replies();
 		if (replies->unreadCountKnown()) {
@@ -1361,6 +1374,10 @@ void SessionNavigation::showSublist(
 		not_null<Data::SavedSublist*> sublist,
 		MsgId itemId,
 		const SectionShow &params) {
+	if (!sublist->session().leemen().allowsPeer(sublist->sublistPeer()->id)
+		|| !sublist->session().leemen().allowsPeer(sublist->peer()->id)) {
+		return;
+	}
 	using namespace HistoryView;
 	auto memento = std::make_shared<ChatMemento>(
 		ChatViewId{
@@ -1391,6 +1408,9 @@ void SessionNavigation::showThread(
 void SessionNavigation::showPeerInfo(
 		not_null<PeerData*> peer,
 		const SectionShow &params) {
+	if (!peer->session().leemen().allowsPeer(peer->id)) {
+		return;
+	}
 	//if (Adaptive::ThreeColumn()
 	//	&& !Core::App().settings().thirdSectionInfoEnabled()) {
 	//	Core::App().settings().setThirdSectionInfoEnabled(true);
@@ -2212,6 +2232,9 @@ void SessionController::showForum(
 		not_null<Data::Forum*> forum,
 		const SectionShow &params,
 		MsgId showAtMsgId) {
+	if (!session().leemen().allowsPeer(forum->peer()->id)) {
+		return;
+	}
 	const auto forced = params.forceTopicsList;
 	if (showForumInDifferentWindow(forum, params, showAtMsgId)) {
 		return;
@@ -3096,6 +3119,10 @@ void SessionController::clearChooseReportMessages() const {
 void SessionController::showInNewWindow(
 		SeparateId id,
 		MsgId msgId) {
+	if (id.thread
+		&& !session().leemen().allowsPeer(id.thread->peer()->id)) {
+		return;
+	}
 	if (!CanShowSeparateWindow(id)) {
 		Assert(id.thread != nullptr);
 		showThread(id.thread, msgId, SectionShow::Way::ClearStack);
@@ -3148,6 +3175,15 @@ void SessionController::showPeerHistory(
 		PeerId peerId,
 		const SectionShow &params,
 		MsgId msgId) {
+	if (peerId && !session().leemen().allowsPeer(peerId)) {
+		return;
+	}
+	if (peerId == session().userPeerId()) {
+		if (const auto item = session().data().message(peerId, msgId);
+			item && item->isHiddenSavedMessage()) {
+			return;
+		}
+	}
 	if (const auto peer = session().data().peerLoaded(peerId)) {
 		if (const auto channel = peer->asChannel()) {
 			if (channel->isCommunity()) {
@@ -3162,6 +3198,11 @@ void SessionController::showPeerHistory(
 void SessionController::showMessage(
 		not_null<const HistoryItem*> item,
 		const SectionShow &params) {
+	if (item->isHiddenSavedMessage()
+		|| !item->history()->session().leemen().allowsPeer(
+			item->history()->peer->id)) {
+		return;
+	}
 	_window->invokeForSessionController(
 		&item->history()->session().account(),
 		item->history()->peer,
@@ -3213,9 +3254,46 @@ void SessionController::cancelUploadLayer(not_null<HistoryItem*> item) {
 	}));
 }
 
+bool SessionController::canShowSection(
+		not_null<SectionMemento*> memento) const {
+	const auto allowed = [](PeerData *peer) {
+		return !peer || peer->session().leemen().allowsPeer(peer->id);
+	};
+	if (const auto chat = dynamic_cast<HistoryView::ChatMemento*>(
+			memento.get())) {
+		const auto id = chat->id();
+		return allowed(id.history->peer)
+			&& (!id.sublist || allowed(id.sublist->sublistPeer()));
+	} else if (const auto info = dynamic_cast<Info::Memento*>(memento.get())) {
+		const auto content = info->content();
+		return allowed(content->peer())
+			&& allowed(content->storiesPeer())
+			&& allowed(content->musicPeer())
+			&& allowed(content->giftsPeer())
+			&& allowed(content->starrefPeer())
+			&& allowed(content->statisticsTag().peer)
+			&& (!content->sublist() || allowed(content->sublist()->sublistPeer()))
+			&& session().leemen().allowsPeer(content->pollContextId().peer)
+			&& session().leemen().allowsPeer(content->reactionsContextId().peer);
+	} else if (const auto pinned = dynamic_cast<HistoryView::PinnedMemento*>(
+			memento.get())) {
+		return allowed(pinned->getThread()->peer());
+	} else if (const auto scheduled = dynamic_cast<HistoryView::ScheduledMemento*>(
+			memento.get())) {
+		return allowed(scheduled->getHistory()->peer);
+	} else if (const auto log = dynamic_cast<AdminLog::SectionMemento*>(
+			memento.get())) {
+		return allowed(log->getChannel());
+	}
+	return true;
+}
+
 void SessionController::showSection(
 		std::shared_ptr<SectionMemento> memento,
 		const SectionShow &params) {
+	if (!canShowSection(memento.get())) {
+		return;
+	}
 	if (!params.thirdColumn
 		&& widget()->showSectionInExistingLayer(memento.get(), params)) {
 		return;

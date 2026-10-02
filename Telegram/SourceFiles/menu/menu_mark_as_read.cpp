@@ -205,8 +205,8 @@ void AddChatListAction(
 	const auto unreadState = (kind == ChatListKind::AllChats)
 		? Data::MainListMapUnreadState(
 			&controller->session(),
-			list()->unreadState())
-		: list()->unreadState();
+			list()->visibleUnreadState())
+		: list()->visibleUnreadState();
 	if (!unreadState.messages && !unreadState.marks && !unreadState.chats) {
 		return;
 	}

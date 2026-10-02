@@ -6366,7 +6366,11 @@ void HistoryWidget::updateOverStates(QPoint pos) {
 		width() - _fieldBarCancel->width(),
 		st::historyReplyHeight);
 	const auto hasWebPage = !!_previewDrawPreview;
-	const auto inDetails = detailsRect.contains(pos)
+	const auto item = (_editMsgId || _replyTo) ? _replyEditMsg : _kbReplyTo;
+	const auto hiddenSaved = _history && _history->peer->isSelf()
+		&& item && item->isHiddenSavedMessage();
+	const auto inDetails = (!hiddenSaved || hasWebPage)
+		&& detailsRect.contains(pos)
 		&& (_editMsgId
 			|| replyTo()
 			|| isReadyToForward
@@ -8967,6 +8971,12 @@ void HistoryWidget::mousePressEvent(QMouseEvent *e) {
 		controller()->widget()->setInnerFocus();
 		return;
 	}
+	const auto item = (_editMsgId || _replyTo) ? _replyEditMsg : _kbReplyTo;
+	if (!_previewDrawPreview
+		&& _history && _history->peer->isSelf()
+		&& item && item->isHiddenSavedMessage()) {
+		return;
+	}
 	const auto isReadyToForward = readyToForward();
 	if (_editMsgId
 		&& (_inDetails || _inPhotoEdit)
@@ -10981,6 +10991,10 @@ void HistoryWidget::updateReplyEditText(not_null<HistoryItem*> item) {
 		.repaint = [=] { updateField(); },
 	});
 	const auto text = [&] {
+		if (_history && _history->peer->isSelf()
+			&& item->isHiddenSavedMessage()) {
+			return _editMsgId ? TextWithEntities() : _replyTo.quote;
+		}
 		const auto media = (_replyTo.todoItemId
 				|| !_replyTo.pollOption.isEmpty())
 			? item->media()
@@ -11030,16 +11044,18 @@ void HistoryWidget::updateReplyEditTexts(bool force) {
 		}
 	}
 	if (_replyEditMsg) {
+		const auto hiddenSaved = _history && _history->peer->isSelf()
+			&& _replyEditMsg->isHiddenSavedMessage();
 		const auto richPage = _replyEditMsg->richPage();
-		const auto editMedia = _editMsgId
+		const auto editMedia = !hiddenSaved && _editMsgId
 			? _replyEditMsg->media()
 			: nullptr;
-		if (_editMsgId && _replyEditMsg && !richPage) {
+		if (!hiddenSaved && _editMsgId && !richPage) {
 			_mediaEditManager.start(_replyEditMsg);
 		} else {
 			_mediaEditManager.cancel();
 		}
-		_canReplaceMedia = _editMsgId
+		_canReplaceMedia = !hiddenSaved && _editMsgId
 			&& !richPage
 			&& _replyEditMsg->allowsEditMedia();
 		if (_canReplaceMedia && editMedia && editMedia->allowsEditMedia()) {
@@ -11120,6 +11136,11 @@ void HistoryWidget::drawField(Painter &p, const QRect &rect) {
 	auto backh = fieldHeight() + 2 * st::historySendPadding;
 	auto hasForward = readyToForward();
 	auto drawMsgText = (_editMsgId || _replyTo) ? _replyEditMsg : _kbReplyTo;
+	const auto hiddenSaved = _history && _history->peer->isSelf()
+		&& drawMsgText && drawMsgText->isHiddenSavedMessage();
+	if (hiddenSaved) {
+		updateReplyEditText(drawMsgText);
+	}
 	if (_editMsgId
 		|| _replyTo
 		|| hasForward
@@ -11133,7 +11154,7 @@ void HistoryWidget::drawField(Painter &p, const QRect &rect) {
 		controller()->isGifPausedAtLeastFor(Window::GifPauseReason::Any));
 	p.fillRect(myrtlrect(0, backy, width(), backh), st::historyReplyBg);
 
-	const auto media = (!_previewDrawPreview && drawMsgText)
+	const auto media = (!hiddenSaved && !_previewDrawPreview && drawMsgText)
 		? drawMsgText->media()
 		: nullptr;
 	const auto poll = media ? media->poll() : nullptr;
@@ -11149,7 +11170,9 @@ void HistoryWidget::drawField(Painter &p, const QRect &rect) {
 		&& (pollMediaPtr->photo || pollMediaPtr->document);
 	const auto hasPreview = pollMediaHasPreview
 		|| (media && media->hasReplyPreview());
-	const auto preview = _mediaEditManager
+	const auto preview = hiddenSaved
+		? nullptr
+		: _mediaEditManager
 		? _mediaEditManager.mediaPreview()
 		: pollMediaHasPreview
 		? (pollMediaPtr->photo
@@ -11205,7 +11228,7 @@ void HistoryWidget::drawField(Painter &p, const QRect &rect) {
 		const auto paused = p.inactive();
 		const auto pausedSpoiler = paused || On(PowerSaving::kChatSpoiler);
 		auto replyLeft = st::historyReplySkip;
-		if (_suggestOptions) {
+		if (!hiddenSaved && _suggestOptions) {
 			_suggestOptions->paintIcon(p, 0, backy, width());
 		} else {
 			(_editMsgId
@@ -11255,13 +11278,13 @@ void HistoryWidget::drawField(Painter &p, const QRect &rect) {
 				}
 				replyLeft += st::historyReplyPreview + st::msgReplyBarSkip;
 			}
-			if (_suggestOptions) {
+			if (!hiddenSaved && _suggestOptions) {
 				_suggestOptions->paintLines(p, replyLeft, backy, width());
 			} else {
 				p.setPen(st::historyReplyNameFg);
 				if (_editMsgId) {
 					paintEditHeader(p, rect, replyLeft, backy);
-				} else {
+				} else if (!hiddenSaved) {
 					_replyToName.drawElided(
 						p,
 						replyLeft,
@@ -11315,7 +11338,7 @@ void HistoryWidget::drawField(Painter &p, const QRect &rect) {
 			- _fieldBarCancel->width()
 			- st::msgReplyPadding.right();
 		_forwardPanel->paint(p, x, backy, available, width());
-	} else if (_suggestOptions) {
+	} else if (!hiddenSaved && _suggestOptions) {
 		_suggestOptions->paintBar(p, 0, backy, width());
 	}
 }

@@ -12,10 +12,26 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "data/data_peer.h"
 #include "main/main_session.h"
 #include "main/main_account.h"
+#include "lang/lang_keys.h"
+#include "leemen/leemen_private_space.h"
 #include "ui/layers/box_content.h"
+#include "window/window_session_controller.h"
 #include "base/unixtime.h"
 
 namespace Export {
+namespace {
+
+[[nodiscard]] bool AllowExport(not_null<Main::Session*> session) {
+	if (!session->leemen().configured() || session->leemen().active()) {
+		return true;
+	}
+	if (const auto window = session->tryResolveWindow()) {
+		window->showToast(tr::lng_leemen_export_unlock(tr::now));
+	}
+	return false;
+}
+
+} // namespace
 
 Manager::Manager() = default;
 
@@ -29,6 +45,9 @@ void Manager::startTopic(
 		not_null<PeerData*> peer,
 		MsgId topicRootId,
 		const QString &topicTitle) {
+	if (!AllowExport(&peer->session())) {
+		return;
+	}
 	if (_panel) {
 		_panel->activatePanel();
 		return;
@@ -45,6 +64,9 @@ void Manager::startTopic(
 void Manager::start(
 		not_null<Main::Session*> session,
 		const MTPInputPeer &singlePeer) {
+	if (!AllowExport(session)) {
+		return;
+	}
 	if (_panel) {
 		_panel->activatePanel();
 		return;
@@ -59,6 +81,12 @@ void Manager::setupPanel(not_null<Main::Session*> session) {
 	_panel = std::make_unique<View::PanelController>(
 		session,
 		_controller.get());
+	session->leemen().changes(
+	) | rpl::filter([=] {
+		return session->leemen().configured() && !session->leemen().active();
+	}) | rpl::on_next([=] {
+		stop();
+	}, _panel->lifetime());
 	session->account().sessionChanges(
 	) | rpl::filter([=](Main::Session *value) {
 		return (value != session);

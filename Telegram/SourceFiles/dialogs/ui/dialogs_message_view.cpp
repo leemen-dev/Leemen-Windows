@@ -144,6 +144,7 @@ bool MessageView::prepared(
 		Data::Forum *forum,
 		Data::SavedMessages *monoforum) const {
 	return (_textCachedFor == item.get())
+		&& (_hiddenSavedMessage == item->isHiddenSavedMessage())
 		&& (_unreadMedia == item->isUnreadMedia())
 		&& ((!forum && !monoforum)
 			|| (_topics
@@ -158,6 +159,11 @@ void MessageView::prepare(
 		Data::SavedMessages *monoforum,
 		Fn<void()> customEmojiRepaint,
 		ToPreviewOptions options) {
+	const auto hiddenSaved = item->isHiddenSavedMessage();
+	if (_hiddenSavedMessage != hiddenSaved) {
+		_textCachedFor = nullptr;
+		_hiddenSavedMessage = hiddenSaved;
+	}
 	if (!forum && !monoforum) {
 		_topics = nullptr;
 	} else if (!_topics
@@ -213,7 +219,7 @@ void MessageView::prepare(
 	TextUtilities::Trim(preview.text);
 	auto textToCache = DialogsPreviewText(std::move(preview.text));
 
-	if (!options.searchLowerText.isEmpty()) {
+	if (!hiddenSaved && !options.searchLowerText.isEmpty()) {
 		static constexpr auto kLeftShift = 15;
 		auto minFrom = std::numeric_limits<uint16>::max();
 

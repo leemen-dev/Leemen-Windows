@@ -6,6 +6,13 @@
 
 add_executable(Telegram WIN32 MACOSX_BUNDLE)
 init_non_host_target(Telegram)
+target_compile_definitions(Telegram PRIVATE TDESKTOP_DISABLE_AUTOUPDATE)
+
+option(TDESKTOP_ENABLE_LEEMEN_PRIVATE_SPACE
+    "Enable enrollment in the experimental local Leemen private space" OFF)
+if (TDESKTOP_ENABLE_LEEMEN_PRIVATE_SPACE)
+    target_compile_definitions(Telegram PRIVATE TDESKTOP_ENABLE_LEEMEN_PRIVATE_SPACE)
+endif()
 
 add_subdirectory(lib_rpl)
 add_subdirectory(lib_crl)
@@ -1458,6 +1465,16 @@ PRIVATE
     main/main_app_config_values.h
     main/main_domain.cpp
     main/main_domain.h
+    leemen/leemen_private_space.cpp
+    leemen/leemen_private_space.h
+    leemen/leemen_private_space_box.cpp
+    leemen/leemen_private_space_box.h
+    leemen/local_pin.cpp
+    leemen/local_pin.h
+    leemen/private_space_state.cpp
+    leemen/private_space_state.h
+    leemen/sync_identifiers.cpp
+    leemen/sync_identifiers.h
     main/main_session.cpp
     main/main_session.h
     main/main_session_settings.cpp

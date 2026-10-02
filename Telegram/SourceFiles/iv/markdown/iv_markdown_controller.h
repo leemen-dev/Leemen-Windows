@@ -67,6 +67,7 @@ public:
 	[[nodiscard]] bool active() const;
 	void showJoinedTooltip();
 	void minimize();
+	void hide();
 
 	[[nodiscard]] rpl::producer<Event> events() const {
 		return _events.events();

@@ -36,6 +36,8 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "history/view/media/history_view_media_common.h"
 #include "ui/chat/chat_style.h"
 #include "lang/lang_keys.h"
+#include "leemen/leemen_private_space.h"
+#include "leemen/leemen_private_space_box.h"
 #include "main/main_app_config.h"
 #include "main/main_domain.h"
 #include "main/main_session.h"
@@ -655,6 +657,17 @@ void BuildSecuritySection(
 		},
 		.keywords = { u"passcode"_q, u"lock"_q, u"pin"_q },
 	});
+
+	if (Leemen::PrivateSpace::EnrollmentEnabled()
+		|| session->leemen().configured()) {
+		builder.addButton({
+			.id = u"security/leemen"_q,
+			.title = tr::lng_leemen_private_space(),
+			.icon = { &st::menuIconLock },
+			.onClick = [=] { Leemen::ShowPrivateSpace(controller); },
+			.keywords = { u"leemen"_q, u"private"_q, u"hidden"_q },
+		});
+	}
 
 	if (session->passkeys().possible()) {
 		auto passkeysLabel = rpl::combine(

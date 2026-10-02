@@ -30,6 +30,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "iv/iv_rich_message_html_export.h"
 #include "iv/iv_rich_page.h"
 #include "lang/lang_keys.h"
+#include "leemen/leemen_private_space.h"
 #include "main/main_session.h"
 #include "main/session/session_show.h"
 #include "media/view/media_view_open_common.h"
@@ -153,13 +154,30 @@ struct LocalMarkdownTarget {
 	return (session && itemId) ? session->data().message(itemId) : nullptr;
 }
 
-[[nodiscard]] bool CanShareMarkdownItem(not_null<HistoryItem*> item) {
-	const auto peer = item->history()->peer;
-	return peer->allowsForwarding() && !item->forbidsForward();
+[[nodiscard]] bool CanShowMessageMarkdown(
+		not_null<Main::Session*> session,
+		FullMsgId itemId) {
+	if (!itemId) {
+		return !session->leemen().configured() || session->leemen().active();
+	} else if (!session->leemen().allowsPeer(itemId.peer)) {
+		return false;
+	}
+	const auto item = session->data().message(itemId);
+	return item && !item->isHiddenSavedMessage();
 }
 
-[[nodiscard]] QString RichMessageKey(FullMsgId itemId) {
-	return u"rich-message:%1:%2"_q
+[[nodiscard]] bool CanShareMarkdownItem(not_null<HistoryItem*> item) {
+	const auto peer = item->history()->peer;
+	return CanShowMessageMarkdown(&peer->session(), item->fullId())
+		&& peer->allowsForwarding()
+		&& !item->forbidsForward();
+}
+
+[[nodiscard]] QString RichMessageKey(
+		not_null<Main::Session*> session,
+		FullMsgId itemId) {
+	return u"rich-message:%1:%2:%3"_q
+		.arg(session->uniqueId())
 		.arg(itemId.peer.value)
 		.arg(itemId.msg.bare);
 }
@@ -946,6 +964,13 @@ void Instance::trackSession(not_null<Main::Session*> session) {
 	if (!_tracking.emplace(session).second) {
 		return;
 	}
+	session->leemen().changes(
+	) | rpl::filter([=] {
+		return !session->leemen().active();
+	}) | rpl::on_next([=] {
+		cancelRichMessageRequests(session);
+		closeMarkdownsForSession(session);
+	}, session->lifetime());
 	session->data().sessionDataAboutToBeCleared(
 	) | rpl::on_next([=] {
 		closeSessionDataViews(session);
@@ -986,19 +1011,25 @@ QString Instance::activeMarkdownKey() const {
 void Instance::takeMarkdown(const QString &key) {
 	_markdownBindings.remove(key);
 	if (auto taken = _markdowns.take(key)) {
+		(*taken)->hide();
 		destroyLater(std::move(*taken));
 	}
 }
 
-void Instance::bindMarkdown(
+bool Instance::bindMarkdown(
 		const QString &key,
 		not_null<Main::Session*> session,
 		FullMsgId itemId) {
+	if (!CanShowMessageMarkdown(session, itemId)) {
+		takeMarkdown(key);
+		return false;
+	}
 	_markdownBindings[key] = {
 		.session = session.get(),
 		.itemId = itemId,
 	};
 	trackSession(session);
+	return true;
 }
 
 void Instance::closeMarkdownsForItem(
@@ -1031,6 +1062,7 @@ void Instance::closeMarkdownsForSession(not_null<Main::Session*> session) {
 }
 
 void Instance::closeSessionDataViews(not_null<Main::Session*> session) {
+	cancelRichMessageRequests(session);
 	closeMarkdownsForSession(session);
 	for (auto i = _htmlExports.begin(); i != _htmlExports.end();) {
 		if ((*i)->session() == session) {
@@ -1048,16 +1080,15 @@ void Instance::closeSessionDataViews(not_null<Main::Session*> session) {
 }
 
 void Instance::cancelRichMessageRequests(not_null<Main::Session*> session) {
-	const auto i = _richMessageRequested.find(session);
-	if (i == end(_richMessageRequested)) {
+	const auto taken = _richMessageRequested.take(session);
+	if (!taken) {
 		return;
 	}
-	for (const auto &[itemId, requested] : i->second) {
+	for (const auto &[itemId, requested] : *taken) {
 		if (requested.requestId) {
 			session->api().request(requested.requestId).cancel();
 		}
 	}
-	_richMessageRequested.erase(i);
 }
 
 void Instance::finishInPageRequest(
@@ -1394,14 +1425,26 @@ void Instance::showRichMessage(
 		not_null<Window::SessionController*> controller,
 		not_null<HistoryItem*> item,
 		QString initialFragment) {
+	const auto session = &controller->session();
+	if (&item->history()->session() != session
+		|| !CanShowMessageMarkdown(session, item->fullId())) {
+		return;
+	}
+	trackSession(session);
 	const auto weak = base::make_weak(controller);
+	const auto sessionWeak = base::make_weak(session);
 	const auto itemId = item->fullId();
-	resolveRichMessage(&controller->session(), item, [=](
+	resolveRichMessage(session, item, [=](
 			std::shared_ptr<const RichPage> page) {
 		const auto strong = weak.get();
-		const auto current = strong
-			? strong->session().data().message(itemId)
-			: nullptr;
+		const auto session = sessionWeak.get();
+		if (!strong
+			|| !session
+			|| &strong->session() != session
+			|| !CanShowMessageMarkdown(session, itemId)) {
+			return;
+		}
+		const auto current = session->data().message(itemId);
 		if (!page || !current) {
 			if (strong && !page) {
 				Ui::Toast::Show(tr::lng_iv_not_supported(tr::now));
@@ -1421,13 +1464,18 @@ void Instance::showRichMessage(
 		not_null<HistoryItem*> item,
 		std::shared_ptr<const RichPage> richPage,
 		QString initialFragment) {
+	const auto session = &controller->session();
+	if (&item->history()->session() != session
+		|| !CanShowMessageMarkdown(session, item->fullId())) {
+		return;
+	}
 	if (Platform::IsMac()) {
 		Core::App().hideMediaView();
 	}
-	const auto session = &controller->session();
 	const auto itemId = item->fullId();
-	const auto key = RichMessageKey(itemId);
+	const auto key = RichMessageKey(session, itemId);
 	const auto title = item->history()->peer->name();
+	const auto sessionWeak = base::make_weak(session);
 	auto clickHandlerContext = ClickHandlerContext();
 	clickHandlerContext.sessionWindow = controller;
 	clickHandlerContext.itemId = itemId;
@@ -1436,10 +1484,18 @@ void Instance::showRichMessage(
 		session,
 		itemId,
 		[=](QString context) {
-			OpenRichMessageChannel(session, context);
+			if (const auto strong = sessionWeak.get()) {
+				if (CanShowMessageMarkdown(strong, itemId)) {
+					OpenRichMessageChannel(strong, context);
+				}
+			}
 		},
 		[=](QString context) {
-			JoinRichMessageChannel(session, context);
+			if (const auto strong = sessionWeak.get()) {
+				if (CanShowMessageMarkdown(strong, itemId)) {
+					JoinRichMessageChannel(strong, context);
+				}
+			}
 		});
 	const auto richLimits = ResolveRichMessageLimits(session);
 	auto prepared = Markdown::TryPrepareNativeInstantView({
@@ -1465,14 +1521,18 @@ void Instance::showRichMessage(
 		.activateMedia = [=](
 				const Markdown::MediaActivation &activation,
 				Qt::MouseButton button) {
-			return ActivateRichMessageMedia(activation, button, context);
+			const auto strong = sessionWeak.get();
+			return strong
+				&& CanShowMessageMarkdown(strong, itemId)
+				&& ActivateRichMessageMedia(activation, button, context);
 		},
 		.downloadTaskFinished = session->downloaderTaskFinished(),
 	};
 	options.initialFragment = std::move(initialFragment);
 	if (CanShareMarkdownItem(item)) {
 		options.share = [=](std::shared_ptr<Ui::Show> show) {
-			const auto current = session->data().message(itemId);
+			const auto session = sessionWeak.get();
+			const auto current = session ? session->data().message(itemId) : nullptr;
 			if (!show || !current || !CanShareMarkdownItem(not_null{ current })) {
 				return;
 			}
@@ -1490,7 +1550,13 @@ void Instance::showRichMessage(
 			title,
 			nullptr,
 			std::move(options));
+		const auto expected = controller.get();
 		controller->events() | rpl::on_next([=](Markdown::Event event) {
+			const auto current = _markdowns.find(key);
+			if (current == end(_markdowns) || current->second.get() != expected) {
+				return;
+			}
+			const auto session = sessionWeak.get();
 			using Type = Markdown::Event::Type;
 			switch (event.type) {
 			case Type::Close:
@@ -1501,7 +1567,9 @@ void Instance::showRichMessage(
 				break;
 			case Type::OpenPage:
 			case Type::OpenFile:
-				if (!event.url.isEmpty()) {
+				if (session
+					&& !event.url.isEmpty()
+					&& CanShowMessageMarkdown(session, itemId)) {
 					UrlClickHandler::Open(event.url, event.context);
 				}
 				break;
@@ -1516,7 +1584,9 @@ void Instance::showRichMessage(
 			title,
 			std::move(options));
 	}
-	bindMarkdown(key, session, itemId);
+	if (!bindMarkdown(key, session, itemId)) {
+		return;
+	}
 	i->second->activate();
 }
 
@@ -1531,6 +1601,10 @@ bool Instance::showMarkdown(
 	const auto itemId = messageContext
 		? messageContext->clickHandlerContext.itemId
 		: FullMsgId();
+	if (messageContext
+		&& (!session || !CanShowMessageMarkdown(session, itemId))) {
+		return true;
+	}
 	auto options = PrepareLocalMarkdownOptions(context);
 	if (!target.sourceName.isEmpty()) {
 		options.sourceName = target.sourceName;
@@ -1543,7 +1617,12 @@ bool Instance::showMarkdown(
 				_delegate,
 				target.path,
 				std::move(options))) {
+			const auto expected = controller.get();
 			controller->events() | rpl::on_next([=](Markdown::Event event) {
+				const auto current = _markdowns.find(target.key);
+				if (current == end(_markdowns) || current->second.get() != expected) {
+					return;
+				}
 				using Type = Markdown::Event::Type;
 				switch (event.type) {
 				case Type::Close:
@@ -1576,7 +1655,9 @@ bool Instance::showMarkdown(
 		i->second->updateOptions(std::move(options));
 	}
 	if (session) {
-		bindMarkdown(target.key, not_null{ session }, itemId);
+		if (!bindMarkdown(target.key, not_null{ session }, itemId)) {
+			return true;
+		}
 	} else {
 		_markdownBindings.remove(target.key);
 	}

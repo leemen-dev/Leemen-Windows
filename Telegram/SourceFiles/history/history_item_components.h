@@ -239,6 +239,7 @@ struct HistoryMessageSavedMediaData
 struct HistoryMessageSaved
 : RuntimeComponent<HistoryMessageSaved, HistoryItem> {
 	PeerId sublistPeerId = 0;
+	PeerId savedSourcePeerId = 0;
 
 	// This can't change after the message is created, but is required
 	// frequently in reactions, so we cache the value here.

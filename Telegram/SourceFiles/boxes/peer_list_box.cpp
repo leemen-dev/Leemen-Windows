@@ -12,6 +12,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "history/history.h" // chatListNameSortKey.
 #include "main/session/session_show.h"
 #include "main/main_session.h"
+#include "leemen/leemen_private_space.h"
 #include "mainwidget.h"
 #include "ui/effects/loading_element.h"
 #include "ui/effects/outline_segments.h"
@@ -187,6 +188,11 @@ void PeerListBox::updateScrollSkips() {
 }
 
 void PeerListBox::prepare() {
+	_controller->session().leemen().changes(
+	) | rpl::on_next([=] {
+		closeBox();
+	}, lifetime());
+
 	setContent(setInnerWidget(
 		object_ptr<PeerListContent>(
 			this,
@@ -472,6 +478,9 @@ void PeerListController::search(const QString &query) {
 }
 
 void PeerListController::peerListSearchAddRow(not_null<PeerData*> peer) {
+	if (!session().leemen().allowsPeer(peer->id)) {
+		return;
+	}
 	if (auto row = delegate()->peerListFindRow(peer->id.value)) {
 		Assert(row->id() == row->peer()->id.value);
 		delegate()->peerListAppendFoundRow(row);
@@ -1275,6 +1284,11 @@ void PeerListContent::appendSearchRow(std::unique_ptr<PeerListRow> row) {
 
 void PeerListContent::appendFoundRow(not_null<PeerListRow*> row) {
 	Expects(showingSearch());
+
+	if (!row->special()
+		&& !_controller->session().leemen().allowsPeer(row->peer()->id)) {
+		return;
+	}
 
 	auto index = findRowIndex(row);
 	if (index.value < 0) {
@@ -2463,7 +2477,9 @@ void PeerListContent::searchQueryChanged(QString query) {
 
 				_filterResults.reserve(minimalList->size());
 				for (const auto &row : *minimalList) {
-					if (allSearchWordsInNames(row)) {
+					if (allSearchWordsInNames(row)
+						&& (row->special() || _controller->session().leemen().allowsPeer(
+							row->peer()->id))) {
 						_filterResults.push_back(row);
 					}
 				}
@@ -2503,6 +2519,9 @@ void PeerListContent::restoreState(
 	clearAllContent();
 
 	for (auto peer : state->list) {
+		if (!_controller->session().leemen().allowsPeer(peer->id)) {
+			continue;
+		}
 		if (auto row = _controller->createRestoredRow(peer)) {
 			appendRow(std::move(row));
 		}
@@ -2511,6 +2530,9 @@ void PeerListContent::restoreState(
 	auto searchWords = TextUtilities::PrepareSearchWords(query);
 	setSearchQuery(query, searchWords.join(' '));
 	for (auto peer : state->filterResults) {
+		if (!_controller->session().leemen().allowsPeer(peer->id)) {
+			continue;
+		}
 		if (auto existingRow = findRow(peer->id.value)) {
 			_filterResults.push_back(existingRow);
 		} else if (auto row = _controller->createSearchRow(peer)) {

@@ -24,6 +24,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "history/history_item.h"
 #include "history/history_unread_things.h"
 #include "main/main_session.h"
+#include "leemen/leemen_private_space.h"
 #include "window/notifications_manager.h"
 
 namespace Data {
@@ -903,6 +904,13 @@ int SavedSublist::fixedOnTopIndex() const {
 }
 
 bool SavedSublist::shouldBeInChatList() const {
+	const auto source = sublistPeer()->id;
+	if (!parentChat()
+		&& source != session().userPeerId()
+		&& source != PeerData::kSavedHiddenAuthorId
+		&& !session().leemen().allowsPeer(source)) {
+		return false;
+	}
 	const auto monoforum = _parent->parentChat();
 	if (monoforum && (monoforum == sublistPeer())) {
 		return false;

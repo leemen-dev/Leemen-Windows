@@ -112,6 +112,8 @@ private:
 	void refreshPostponed(bool added);
 	void addPostponed(not_null<const Data::DownloadedId*> entry);
 	void performRefresh();
+	void refreshLoading();
+	void refreshVisibility();
 	void performAdd();
 	void addElementNow(Element &&element);
 	void remove(not_null<const HistoryItem*> item);

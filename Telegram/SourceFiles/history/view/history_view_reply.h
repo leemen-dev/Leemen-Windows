@@ -142,6 +142,7 @@ private:
 		not_null<PeerData*> peer,
 		bool shorten) const;
 
+	bool _hiddenSavedReply = false;
 	ClickHandlerPtr _link;
 	std::unique_ptr<Ui::SpoilerAnimation> _spoiler;
 	mutable QImage _spoilerCache;

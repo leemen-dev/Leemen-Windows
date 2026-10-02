@@ -59,6 +59,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "window/window_session_controller.h"
 #include "window/window_peer_menu.h"
 #include "main/main_session.h"
+#include "leemen/leemen_private_space.h"
 #include "media/player/media_player_instance.h"
 #include "dialogs/ui/dialogs_video_userpic.h"
 #include "ui/layers/generic_box.h"
@@ -668,6 +669,23 @@ ListWidget::ListWidget(
 		update();
 	}, lifetime());
 
+	_session->leemen().changes(
+	) | rpl::on_next([=] {
+		_hiddenSavedPreloadRange = std::nullopt;
+		auto items = HistoryItemsList();
+		for (const auto view : _items) {
+			if (view->history()->peer->isSelf()) {
+				items.push_back(view->data());
+			}
+		}
+		for (const auto item : items) {
+			if (const auto view = viewForItem(item)) {
+				refreshItem(view);
+			}
+		}
+		refreshViewer();
+	}, lifetime());
+
 	_session->data().itemRemoved(
 	) | rpl::on_next([=](not_null<const HistoryItem*> item) {
 		itemRemoved(item);
@@ -859,10 +877,15 @@ void ListWidget::refreshRows(const Data::MessagesSlice &old) {
 	_items.reserve(_slice.ids.size());
 	std::swap(_views, _viewsCapacity);
 	auto nearestIndex = -1;
+	auto hiddenSavedCount = 0;
 	const auto pushItem = [&](const FullMsgId &fullId) {
 		if (const auto item = session().data().message(fullId)) {
 			if (_slice.nearestToAround == fullId) {
 				nearestIndex = int(_items.size());
+			}
+			if (item->isHiddenSavedMessage()) {
+				++hiddenSavedCount;
+				return;
 			}
 			const auto view = enforceViewForItem(item, _viewsCapacity);
 			_items.push_back(view);
@@ -897,7 +920,8 @@ void ListWidget::refreshRows(const Data::MessagesSlice &old) {
 			_itemRevealPending.emplace(*i);
 		}
 	}
-	updateAroundPositionFromNearest(nearestIndex);
+	updateAroundPositionFromNearest(
+		std::min(nearestIndex, int(_items.size()) - 1));
 
 	updateItemsGeometry();
 
@@ -940,6 +964,27 @@ void ListWidget::refreshRows(const Data::MessagesSlice &old) {
 	}
 	checkActivation();
 	checkAnnounceFirstMessages();
+	constexpr auto kHiddenSavedPreloadLimit = 2048;
+	if (hiddenSavedCount
+		&& _items.size() < kMinimalIdsLimit
+		&& hiddenSavedCount + _items.size() == _slice.ids.size()
+		&& (_slice.skippedBefore != 0 || _slice.skippedAfter != 0)
+		&& _idsLimit < kHiddenSavedPreloadLimit) {
+		const auto range = std::make_pair(
+			_slice.ids.front(),
+			_slice.ids.back());
+		if (_hiddenSavedPreloadRange != range) {
+			_hiddenSavedPreloadRange = range;
+			_idsLimit = std::min(_idsLimit * 2, kHiddenSavedPreloadLimit);
+			const auto around = _aroundPosition;
+			crl::on_main(this, [=] {
+				if (_hiddenSavedPreloadRange == range
+					&& _aroundPosition == around) {
+					refreshViewer();
+				}
+			});
+		}
+	}
 	_delegate->listContentRefreshed();
 }
 
@@ -2681,6 +2726,7 @@ void ListWidget::saveState(not_null<ListMemento*> memento) {
 }
 
 void ListWidget::restoreState(not_null<ListMemento*> memento) {
+	_hiddenSavedPreloadRange = std::nullopt;
 	_aroundPosition = memento->aroundPosition();
 	_aroundIndex = -1;
 	if (const auto limit = memento->idsLimit()) {

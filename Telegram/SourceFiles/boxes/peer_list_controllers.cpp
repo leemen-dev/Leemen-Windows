@@ -23,6 +23,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "ui/painter.h"
 #include "ui/ui_utility.h"
 #include "main/main_session.h"
+#include "leemen/leemen_private_space.h"
 #include "data/data_peer_values.h"
 #include "data/data_saved_messages.h"
 #include "data/data_saved_sublist.h"
@@ -524,10 +525,16 @@ QString ChatsListBoxController::emptyBoxText() const {
 
 std::unique_ptr<PeerListRow> ChatsListBoxController::createSearchRow(
 		not_null<PeerData*> peer) {
+	if (!session().leemen().allowsPeer(peer->id)) {
+		return nullptr;
+	}
 	return createRow(peer->owner().history(peer));
 }
 
 bool ChatsListBoxController::appendRow(not_null<History*> history) {
+	if (!session().leemen().allowsPeer(history->peer->id)) {
+		return false;
+	}
 	if (auto row = delegate()->peerListFindRow(history->peer->id.value)) {
 		updateRowHook(static_cast<Row*>(row));
 		return false;
@@ -717,6 +724,9 @@ void ContactsBoxController::checkForEmptyRows() {
 
 std::unique_ptr<PeerListRow> ContactsBoxController::createSearchRow(
 		not_null<PeerData*> peer) {
+	if (!session().leemen().allowsPeer(peer->id)) {
+		return nullptr;
+	}
 	if (const auto user = peer->asUser()) {
 		return createRow(user);
 	}
@@ -806,6 +816,9 @@ void ContactsBoxController::sortByOnline() {
 }
 
 bool ContactsBoxController::appendRow(not_null<UserData*> user) {
+	if (!session().leemen().allowsPeer(user->id)) {
+		return false;
+	}
 	if (auto row = delegate()->peerListFindRow(user->id.value)) {
 		updateRowHook(row);
 		return false;
@@ -1584,7 +1597,8 @@ std::unique_ptr<PeerListRow> ChooseCommunityChatBoxController::createSearchRow(
 
 auto ChooseCommunityChatBoxController::createRow(not_null<History*> history)
 -> std::unique_ptr<PeerListRow> {
-	if (_filter && !_filter(history)) {
+	if (!session().leemen().allowsPeer(history->peer->id)
+		|| (_filter && !_filter(history))) {
 		return nullptr;
 	}
 	auto result = std::make_unique<PeerListRow>(history->peer);

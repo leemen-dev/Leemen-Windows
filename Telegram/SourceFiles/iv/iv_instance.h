@@ -169,7 +169,7 @@ private:
 	[[nodiscard]] QString activeMarkdownKey() const;
 	void takeMarkdown(const QString &key);
 
-	void bindMarkdown(
+	[[nodiscard]] bool bindMarkdown(
 		const QString &key,
 		not_null<Main::Session*> session,
 		FullMsgId itemId);

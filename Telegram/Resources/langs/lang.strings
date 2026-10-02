@@ -8776,3 +8776,24 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 "lng_folder_archive_status" = "ZIP archive";
 
 // Keys finished
+
+"lng_leemen_private_space" = "Leemen Private Space";
+"lng_leemen_export_unlock" = "Enter Private Space before exporting Telegram data. Exported files remain accessible outside Leemen after Private Space locks.";
+"lng_leemen_unlock" = "Enter Private Space";
+"lng_leemen_lock" = "Lock Private Space";
+"lng_leemen_pin_create" = "Set Private Space PIN";
+"lng_leemen_pin" = "PIN (4–12 digits)";
+"lng_leemen_pin_confirm" = "Confirm PIN";
+"lng_leemen_pin_prompt" = "Enter your local Private Space PIN. Private Space locks when you leave the app or switch accounts.";
+"lng_leemen_pin_format" = "Use 4–12 digits from 0 to 9. If the PIN cannot be saved, try again.";
+"lng_leemen_pin_mismatch" = "The PINs do not match.";
+"lng_leemen_pin_wrong" = "Incorrect PIN.";
+"lng_leemen_pin_retry" = "Too many attempts. Wait 30 seconds and try again.";
+"lng_leemen_pin_change" = "Change PIN";
+"lng_leemen_local_preview" = "Experimental local preview. Chats and PIN are stored on this device only and do not sync with Leemen Android. Some privacy protections are still under development. Use a test account; this preview is not ready for sensitive conversations. There is no PIN recovery.";
+"lng_leemen_active_about" = "Private Space is open. Right-click a chat to hide it or return it to the normal list. Lock Private Space from the main menu when finished. It also locks when you leave the app or switch accounts.";
+"lng_leemen_hide_chat" = "Hide in Private Space";
+"lng_leemen_reveal_chat" = "Remove from Private Space";
+"lng_leemen_disable" = "Turn off Private Space";
+"lng_leemen_disable_confirm" = "All locally hidden chats will become visible in the normal list and the local PIN will be removed. Telegram messages will not be deleted.";
+"lng_leemen_storage_error" = "Private Space settings could not be read. Normal chat access is blocked. Restore a working backup of this account's local data before continuing.";

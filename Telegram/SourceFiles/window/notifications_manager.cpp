@@ -42,6 +42,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "main/main_account.h"
 #include "main/main_domain.h"
 #include "main/main_session.h"
+#include "leemen/leemen_private_space.h"
 #include "main/main_session_settings.h"
 #include "ui/text/text_utilities.h"
 #include "platform/platform_specific.h"
@@ -351,7 +352,10 @@ System::SkipState System::computeSkipState(
 	const auto notifyBy = messageType
 		? item->specialNotificationPeer()
 		: notification.reactionOrVoteSender;
-	if (Core::Quitting()) {
+	if (Core::Quitting()
+		|| item->isHiddenSavedMessage()
+		|| item->history()->session().leemen().hidden(
+			item->history()->peer->id)) {
 		return { SkipState::Skip };
 	} else if (!Core::App().settings().notifyFromAll()
 		&& &thread->session().account() != &Core::App().domain().active()) {
@@ -687,11 +691,14 @@ void System::showGrouped() {
 	if (const auto session = findSession(_lastHistorySessionId)) {
 		if (const auto lastItem = session->data().message(_lastHistoryItemId)) {
 			_waitForAllGroupedTimer.cancel();
-			_manager->showNotification({
-				.item = lastItem,
-				.forwardedCount = _lastForwardedCount,
-				.soundId = _lastSoundId,
-			});
+			if (!lastItem->isHiddenSavedMessage()
+				&& !session->leemen().hidden(lastItem->history()->peer->id)) {
+				_manager->showNotification({
+					.item = lastItem,
+					.forwardedCount = _lastForwardedCount,
+					.soundId = _lastSoundId,
+				});
+			}
 			_lastForwardedCount = 0;
 			_lastHistoryItemId = FullMsgId();
 			_lastHistorySessionId = 0;
@@ -748,7 +755,8 @@ void System::showNext() {
 		}
 	}
 	const auto &settings = Core::App().settings();
-	if (alertThread) {
+	if (alertThread
+		&& !alertThread->session().leemen().hidden(alertThread->peer()->id)) {
 		if (settings.flashBounceNotify()) {
 			const auto peer = alertThread->peer();
 			if (const auto window = Core::App().windowFor(peer)) {
@@ -841,6 +849,16 @@ void System::showNext() {
 			break;
 		}
 		const auto notifyItem = notify->item;
+		if (notifyItem->isHiddenSavedMessage()
+			|| notifyItem->history()->session().leemen().hidden(
+				notifyItem->history()->peer->id)) {
+			notifyThread->clearNotifications();
+			_whenMaps.remove(notifyThread);
+			_whenAlerts.remove(notifyThread);
+			_waiters.remove(notifyThread);
+			_settingWaiters.remove(notifyThread);
+			continue;
+		}
 		const auto notifySilent = computeSkipState(*notify).silent;
 		const auto messageType = (notify->type
 			== Data::ItemNotificationType::Message);
@@ -1280,11 +1298,17 @@ void Manager::notificationActivated(
 		ActivateOptions &&options) {
 	onBeforeNotificationActivated(id);
 	if (const auto session = system()->findSession(id.contextId.sessionId)) {
+		if (session->leemen().hidden(id.contextId.peerId)) {
+			return;
+		}
 		const auto history = session->data().history(
 			id.contextId.peerId);
 		const auto item = history->owner().message(
 			history->peer,
 			id.msgId);
+		if (item && item->isHiddenSavedMessage()) {
+			return;
+		}
 		const auto topic = item ? item->topic() : nullptr;
 		const auto sublist = item ? item->savedSublist() : nullptr;
 		if (!options.draft.text.isEmpty()) {
@@ -1330,6 +1354,9 @@ Window::SessionController *Manager::openNotificationMessage(
 		not_null<History*> history,
 		MsgId messageId,
 		bool openSeparated) {
+	if (history->session().leemen().hidden(history->peer->id)) {
+		return nullptr;
+	}
 	if (Core::App().passcodeLocked()) {
 		const auto window = history->session().tryResolveWindow();
 		if (window) {
@@ -1340,6 +1367,9 @@ Window::SessionController *Manager::openNotificationMessage(
 		return window;
 	}
 	const auto item = history->owner().message(history->peer, messageId);
+	if (item && item->isHiddenSavedMessage()) {
+		return nullptr;
+	}
 	const auto openExactlyMessage = !history->peer->isBroadcast()
 		&& item
 		&& item->isRegular()
@@ -1422,11 +1452,14 @@ void Manager::notificationReplied(
 	}
 
 	const auto session = system()->findSession(id.contextId.sessionId);
-	if (!session) {
+	if (!session || session->leemen().hidden(id.contextId.peerId)) {
 		return;
 	}
 	const auto history = session->data().history(id.contextId.peerId);
 	const auto item = history->owner().message(history->peer, id.msgId);
+	if (item && item->isHiddenSavedMessage()) {
+		return;
+	}
 	const auto topic = item ? item->topic() : nullptr;
 	const auto topicRootId = topic
 		? topic->rootId()
@@ -1478,12 +1511,12 @@ void Manager::notificationActionActivated(
 		return;
 	}
 	const auto session = system()->findSession(id.contextId.sessionId);
-	if (!session) {
+	if (!session || session->leemen().hidden(id.contextId.peerId)) {
 		return;
 	}
 	const auto history = session->data().history(id.contextId.peerId);
 	const auto item = history->owner().message(history->peer, id.msgId);
-	if (!item || !item->isRegular()) {
+	if (!item || item->isHiddenSavedMessage() || !item->isRegular()) {
 		return;
 	}
 	const auto owner = &history->owner();

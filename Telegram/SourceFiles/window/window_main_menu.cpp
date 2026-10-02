@@ -33,6 +33,8 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "info/profile/info_profile_icon.h"
 #include "info/stories/info_stories_widget.h"
 #include "lang/lang_keys.h"
+#include "leemen/leemen_private_space.h"
+#include "leemen/leemen_private_space_box.h"
 #include "main/main_account.h"
 #include "main/main_domain.h"
 #include "main/main_session.h"
@@ -746,6 +748,25 @@ void MainMenu::setupMenu() {
 	)->setClickedCallback([=] {
 		controller->showSettings();
 	});
+
+	if (Leemen::PrivateSpace::EnrollmentEnabled()
+		|| controller->session().leemen().configured()) {
+		auto label = rpl::single(rpl::empty) | rpl::then(
+			controller->session().leemen().changes()
+		) | rpl::map([=] {
+			return controller->session().leemen().active()
+				? tr::lng_leemen_lock(tr::now)
+				: tr::lng_leemen_private_space(tr::now);
+		});
+		addAction(std::move(label), { &st::menuIconLock }
+		)->setClickedCallback([=] {
+			if (controller->session().leemen().active()) {
+				controller->session().leemen().lock();
+			} else {
+				Leemen::ShowPrivateSpace(controller);
+			}
+		});
+	}
 
 	_nightThemeToggle = addAction(
 		tr::lng_menu_night_mode(),

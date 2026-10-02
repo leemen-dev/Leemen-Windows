@@ -592,6 +592,9 @@ int Service::marginBottom() const {
 }
 
 void Service::draw(Painter &p, const PaintContext &context) const {
+	if (data()->isHiddenSavedMessage()) {
+		return;
+	}
 	auto g = countGeometry();
 	if (g.width() < 1) {
 		return;
@@ -854,6 +857,9 @@ void Service::updatePressed(QPoint point) {
 }
 
 TextForMimeData Service::selectedText(TextSelection selection) const {
+	if (data()->isHiddenSavedMessage()) {
+		return {};
+	}
 	return text().toTextForMimeData(selection);
 }
 
