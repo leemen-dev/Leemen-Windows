@@ -29,6 +29,10 @@ struct SyncPair {
 	std::int64_t contentVersion = 0;
 };
 
+[[nodiscard]] bool CanRetainTrustedProjection(
+	const SyncPair &trusted,
+	const SyncPair &pending);
+
 struct SyncCheckpoint {
 	std::optional<SyncPair> pending;
 	std::optional<PinRegister> authorizedPin;

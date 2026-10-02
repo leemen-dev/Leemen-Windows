@@ -152,6 +152,7 @@ void TestBounds() {
 		Check(!OpenBlob(kCiphertext, kVectorNonce, key), "reject malformed open key size");
 		Check(!WrapMasterKey(key, kVectorKey), "reject malformed master key size");
 		Check(!WrapMasterKey(kVectorKey, key), "reject malformed wrapping key size");
+		Check(!MasterKeyFingerprint(key), "fingerprint requires exact master key length");
 	}
 	for (const auto size : { 0U, 8U, 16U, 23U, 25U, 32U }) {
 		const auto nonce = std::vector<unsigned char>(size);
@@ -278,6 +279,12 @@ void TestSecretOwnership() {
 	const auto first = RandomKey();
 	const auto second = RandomKey();
 	Check(first && second && !Equal(first->bytes(), second->bytes()), "fresh random keys");
+	const auto fingerprint = MasterKeyFingerprint(kVectorKey);
+	Check(fingerprint && *fingerprint == kMasterKeyFingerprint, "fixed SHA256 master key fingerprint");
+	Check(MasterKeyFingerprint(kVectorKey) == fingerprint, "fingerprint stable across reload");
+	auto changedKey = kVectorKey;
+	changedKey.back() ^= 1;
+	Check(MasterKeyFingerprint(changedKey) != fingerprint, "key rotation changes journal fingerprint");
 }
 
 } // namespace

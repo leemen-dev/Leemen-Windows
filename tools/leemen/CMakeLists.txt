@@ -38,11 +38,35 @@ add_executable(leemen_sync_coordinator_tests
     "${leemen_source_root}/leemen/sync_coordinator.cpp"
     "${leemen_source_root}/test/leemen/sync_coordinator_tests.cpp"
 )
+add_executable(leemen_sync_local_intents_tests
+    "${leemen_source_root}/leemen/sync_blob.cpp"
+    "${leemen_source_root}/leemen/sync_identifiers.cpp"
+    "${leemen_source_root}/test/leemen/sync_local_intents_tests.cpp"
+)
 add_executable(leemen_sync_crypto_tests
     "${leemen_source_root}/leemen/sync_crypto.cpp"
     "${leemen_source_root}/test/leemen/sync_crypto_tests.cpp"
 )
 target_link_libraries(leemen_sync_crypto_tests PRIVATE OpenSSL::Crypto leemen::sodium)
+
+add_executable(leemen_sync_backend_tests
+    "${leemen_source_root}/leemen/sync_backend.cpp"
+    "${leemen_source_root}/leemen/sync_blob.cpp"
+    "${leemen_source_root}/leemen/sync_identifiers.cpp"
+    "${leemen_source_root}/leemen/sync_crypto.cpp"
+    "${leemen_source_root}/test/leemen/sync_backend_tests.cpp"
+)
+target_link_libraries(leemen_sync_backend_tests PRIVATE OpenSSL::Crypto leemen::sodium)
+add_executable(leemen_security_policy_tests
+    "${leemen_source_root}/leemen/security_policy.cpp"
+    "${leemen_source_root}/test/leemen/security_policy_tests.cpp"
+)
+add_executable(leemen_max_privacy_tests
+    "${leemen_source_root}/leemen/max_privacy.cpp"
+    "${leemen_source_root}/leemen/sync_crypto.cpp"
+    "${leemen_source_root}/test/leemen/max_privacy_tests.cpp"
+)
+target_link_libraries(leemen_max_privacy_tests PRIVATE OpenSSL::Crypto leemen::sodium)
 
 foreach(leemen_test IN ITEMS
         leemen_private_space_tests
@@ -51,7 +75,11 @@ foreach(leemen_test IN ITEMS
         leemen_private_drafts_tests
         leemen_sync_blob_tests
         leemen_sync_coordinator_tests
-        leemen_sync_crypto_tests)
+        leemen_sync_local_intents_tests
+        leemen_security_policy_tests
+        leemen_max_privacy_tests
+        leemen_sync_crypto_tests
+        leemen_sync_backend_tests)
     target_include_directories(${leemen_test} PRIVATE "${leemen_source_root}")
     target_compile_features(${leemen_test} PRIVATE cxx_std_20)
     set_target_properties(${leemen_test} PROPERTIES CXX_EXTENSIONS OFF)

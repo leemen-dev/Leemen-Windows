@@ -1,6 +1,7 @@
 #include "leemen/sync_crypto.h"
 
 #include <openssl/crypto.h>
+#include <openssl/evp.h>
 #include <openssl/rand.h>
 #include <sodium.h>
 
@@ -128,6 +129,26 @@ std::optional<SecretKey> RandomKey() {
 std::optional<Salt> RandomSalt() {
 	auto result = Salt();
 	return FillRandom(result) ? std::make_optional(result) : std::nullopt;
+}
+
+std::optional<std::array<unsigned char, kKeyBytes>> MasterKeyFingerprint(
+		std::span<const unsigned char> key) {
+	if (key.size() != kKeyBytes) {
+		return std::nullopt;
+	}
+	auto result = std::array<unsigned char, kKeyBytes>();
+	auto written = 0U;
+	if (EVP_Digest(
+			key.data(),
+			key.size(),
+			result.data(),
+			&written,
+			EVP_sha256(),
+			nullptr) != 1
+		|| written != result.size()) {
+		return std::nullopt;
+	}
+	return result;
 }
 
 std::optional<EncryptedBlob> SealBlob(

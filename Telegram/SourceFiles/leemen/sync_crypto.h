@@ -62,6 +62,8 @@ struct EncryptedBlob {
 
 [[nodiscard]] std::optional<SecretKey> RandomKey();
 [[nodiscard]] std::optional<Salt> RandomSalt();
+[[nodiscard]] std::optional<std::array<unsigned char, kKeyBytes>> MasterKeyFingerprint(
+	std::span<const unsigned char> key);
 [[nodiscard]] std::optional<EncryptedBlob> SealBlob(
 	std::span<const unsigned char> plaintext,
 	std::span<const unsigned char> key);

@@ -5,6 +5,30 @@
 #include <utility>
 
 namespace Leemen::Sync {
+
+bool CanRetainTrustedProjection(const SyncPair &trusted, const SyncPair &pending) {
+	auto filter = trusted.filter;
+	filter.lamport = pending.filter.lamport;
+	if (filter != pending.filter) {
+		return false;
+	}
+	const auto normalize = [](ContentBlob content) {
+		content.lamport = 0;
+		content.privateSearchDialogIds.clear();
+		content.settings.pinTimeoutMinutes.reset();
+		for (auto i = content.perChat.begin(); i != content.perChat.end();) {
+			i->second.selfPinned.clear();
+			if (i->second == PerChat()) {
+				i = content.perChat.erase(i);
+			} else {
+				++i;
+			}
+		}
+		return content;
+	};
+	return normalize(trusted.content) == normalize(pending.content);
+}
+
 namespace {
 
 constexpr auto kMaximumVersion = std::int64_t(9007199254740991LL);
@@ -183,6 +207,14 @@ std::vector<SyncRequest> SyncCoordinator::reconcile() {
 			: SyncFailure::InvalidData);
 		return {};
 	}
+	const auto filterFloor = std::max(_remote.filterVersion,
+		_pending ? _pending->filterVersion : std::int64_t(0));
+	const auto contentFloor = std::max(_remote.contentVersion,
+		_pending ? _pending->contentVersion : std::int64_t(0));
+	if (_filterRead->version < filterFloor || _contentRead->version < contentFloor) {
+		block(SyncFailure::InvalidData);
+		return {};
+	}
 	if (_pending && content.blob->pin != _authorizedPin) {
 		block(SyncFailure::AuthorizationChanged);
 		return {};
@@ -202,6 +234,8 @@ std::vector<SyncRequest> SyncCoordinator::reconcile() {
 	}
 	_pending->filter = MergeFilter(_remote.filter, _pending->filter);
 	_pending->content = MergeContent(_remote.content, _pending->content);
+	_pending->filterVersion = _remote.filterVersion;
+	_pending->contentVersion = _remote.contentVersion;
 	RecomputeOffModeVisible(_pending->filter, _pending->content);
 	if (!EncodeFilterBlob(_pending->filter)
 		|| !EncodeContentBlob(_pending->content)) {
@@ -271,9 +305,11 @@ std::vector<SyncRequest> SyncCoordinator::acceptWrite(
 	if (sent.kind == BlobKind::Filter) {
 		_remote.filter = _pending->filter;
 		_remote.filterVersion = version;
+		_pending->filterVersion = version;
 	} else {
 		_remote.content = _pending->content;
 		_remote.contentVersion = version;
+		_pending->contentVersion = version;
 		_authorizedPin = _remote.content.pin;
 	}
 	return nextWrite();

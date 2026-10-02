@@ -182,6 +182,73 @@ void CrashRecovery() {
 	Check(!restarted.projection() && !restarted.pendingMutation(), "invalid journal leaves closed gate");
 }
 
+void RemoteResetCannotResurrectState() {
+	auto sync = SyncCoordinator();
+	auto reads = sync.pull();
+	(void)sync.acceptRead(reads[0].id, Present(FilterBlob(), 4));
+	(void)sync.acceptRead(reads[1].id, Present(ContentBlob(), 7));
+	Check(sync.projection(), "established server versions trusted");
+	reads = SubmitHide(sync);
+	const auto saved = sync.checkpoint();
+	(void)sync.acceptRead(reads[0].id, Absent());
+	Check(sync.acceptRead(reads[1].id, Absent()).empty(), "server reset emits no resurrection PUT");
+	Check(sync.failure() == SyncFailure::InvalidData && sync.pendingMutation(), "reset preserves journal behind closed gate");
+	auto restarted = SyncCoordinator();
+	Check(restarted.restoreCheckpoint(saved), "restore reset-race journal");
+	reads = restarted.pull();
+	(void)restarted.acceptRead(reads[0].id, Present(FilterBlob(), 3));
+	Check(restarted.acceptRead(reads[1].id, Present(ContentBlob(), 7)).empty(), "nonzero version regression also rejected");
+	Check(restarted.failure() == SyncFailure::InvalidData, "persisted version floor survives restart");
+	auto ownWrite = EmptyReady();
+	reads = SubmitHide(ownWrite);
+	(void)ownWrite.acceptRead(reads[0].id, Absent());
+	auto writes = ownWrite.acceptRead(reads[1].id, Absent());
+	writes = ownWrite.acceptWrite(writes[0].id, RemoteWriteStatus::Accepted, 1);
+	Check(ownWrite.checkpoint().pending->contentVersion == 1, "own partial commit raises journal floor");
+	reads = ownWrite.acceptWrite(writes[0].id, RemoteWriteStatus::Conflict);
+	(void)ownWrite.acceptRead(reads[0].id, Absent());
+	(void)ownWrite.acceptRead(reads[1].id, Absent());
+	Check(ownWrite.failure() == SyncFailure::InvalidData, "reset after own partial commit stays closed");
+}
+
+void NonVisibilityMutations() {
+	auto trusted = SyncPair();
+	trusted.filter.hiddenChatIds["42"] = { "present", 1, "android", {} };
+	trusted.content.perChat["42"].messageState["5"] = { "hidden", 1, "android", {} };
+	auto pending = trusted;
+	pending.filter.lamport = pending.content.lamport = 2;
+	pending.content.privateSearchDialogIds["42"] = { "present", 2, "windows", {} };
+	Check(CanRetainTrustedProjection(trusted, pending), "private search sync keeps view open");
+	pending.content.settings.pinTimeoutMinutes = IntRegister{ 5, 2, "windows", {} };
+	Check(CanRetainTrustedProjection(trusted, pending), "timeout sync keeps current view");
+	pending.content.perChat["43"].selfPinned["2"] = { "present", 2, "windows", {} };
+	Check(CanRetainTrustedProjection(trusted, pending), "self-pin-only chat does not close view");
+	auto unsafe = pending;
+	unsafe.filter.hiddenChatIds["43"] = { "present", 2, "windows", {} };
+	Check(!CanRetainTrustedProjection(trusted, unsafe), "new membership closes projection");
+	unsafe = pending;
+	unsafe.filter.chatsOffModeVisible.push_back("42");
+	Check(!CanRetainTrustedProjection(trusted, unsafe), "OFF visibility change closes projection");
+	unsafe = pending;
+	unsafe.content.perChat["42"].messageState["5"] = { "exposed", 2, "windows", {} };
+	Check(!CanRetainTrustedProjection(trusted, unsafe), "message visibility change closes projection");
+	unsafe = pending;
+	unsafe.content.perChat["43"].clearedAtClock = 2;
+	Check(!CanRetainTrustedProjection(trusted, unsafe), "clear barrier closes projection");
+	unsafe = pending;
+	unsafe.content.pin = PinRegister();
+	Check(!CanRetainTrustedProjection(trusted, unsafe), "PIN epoch closes projection");
+	unsafe = pending;
+	unsafe.content.settings.allowScreenshots = BoolRegister{ false, 2, "windows", {} };
+	Check(!CanRetainTrustedProjection(trusted, unsafe), "capture setting closes projection");
+	unsafe = pending;
+	unsafe.content.unknownFields["future_visibility"].value = true;
+	Check(!CanRetainTrustedProjection(trusted, unsafe), "future semantics close projection");
+	unsafe = pending;
+	unsafe.content.perChat["43"].unknownFields["future"].value = true;
+	Check(!CanRetainTrustedProjection(trusted, unsafe), "future per-chat semantics retained in comparison");
+}
+
 } // namespace
 
 int main() {
@@ -191,5 +258,7 @@ int main() {
 	CorruptConflictAndAuthorization();
 	ConflictBudgetAndBadAcknowledgement();
 	CrashRecovery();
+	RemoteResetCannotResurrectState();
+	NonVisibilityMutations();
 	std::cout << Checks << " sync coordinator checks passed\n";
 }

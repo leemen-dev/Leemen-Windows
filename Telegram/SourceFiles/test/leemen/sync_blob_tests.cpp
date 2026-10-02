@@ -193,7 +193,9 @@ void DecodeResults() {
 			== BlobReadStatus::Invalid);
 	}
 	CHECK(ReadContentBlob(ContentText(",\"platform\":[]")).status == BlobReadStatus::Invalid);
-	CHECK(!EncodeFilterBlob(FilterBlob{ .lamport = -1 }));
+	auto negativeClock = FilterBlob();
+	negativeClock.lamport = -1;
+	CHECK(!EncodeFilterBlob(negativeClock));
 	auto invalid = FilterBlob();
 	invalid.unknownFields["schema_version"] = Json("3");
 	CHECK(!EncodeFilterBlob(invalid));
@@ -308,7 +310,7 @@ void PinsAndSettings() {
 }
 
 void RegisterMerges() {
-	for (const auto states : {
+	for (const auto &states : {
 		std::pair{ "present", "removed" }, std::pair{ "removed", "present" } }) {
 		auto left = FilterBlob();
 		auto right = FilterBlob();
