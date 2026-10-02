@@ -4,7 +4,11 @@ on:
   workflow_dispatch:
     inputs:
       leemen_private_space:
-        description: 'Enable experimental local Private Space (test accounts only)'
+        description: 'Enable experimental Private Space (test accounts only)'
+        type: boolean
+        default: false
+      prepare_only:
+        description: 'Cache Windows dependencies without compiling the client'
         type: boolean
         default: false
   push:
@@ -53,6 +57,7 @@ on:
 jobs:
 
   windows:
+    if: github.repository == 'telegramdesktop/tdesktop' || github.event_name == 'workflow_dispatch'
     name: Windows
     runs-on: ${{ matrix.arch == 'arm64' && 'windows-11-arm' || ((github.repository == 'telegramdesktop/tdesktop' && (github.event_name == 'pull_request' || startsWith(github.ref, 'refs/tags/') || github.ref == 'refs/heads/nightly')) && 'depot-windows-latest-16' || 'windows-latest') }}
 
@@ -69,7 +74,7 @@ jobs:
 
     env:
       UPLOAD_ARTIFACT: "true"
-      ONLY_CACHE: "false"
+      ONLY_CACHE: ${{ inputs.prepare_only && 'true' || 'false' }}
       PREPARE_PATH: "Telegram/build/prepare/prepare.py"
 
     defaults:
@@ -169,8 +174,37 @@ jobs:
           restore-keys: ${{ runner.OS }}-${{ matrix.arch }}-${{ matrix.qt || 'qt' }}-
 
       - name: Libraries.
+        id: prepare-libraries
         run: |
           %TBUILD%\%REPO_NAME%\Telegram\build\prepare\win.bat skip-release silent ${{ matrix.qt }}
+
+      - name: Save prepared tools for compiler retries.
+        if: always() && !cancelled() && steps.prepare-libraries.outcome != 'skipped'
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ env.TBUILD }}\ThirdParty
+          key: ${{ runner.OS }}-${{ runner.arch }}-third-party-${{ env.CACHE_KEY }}-${{ github.run_id }}
+
+      - name: Save prepared libraries for compiler retries.
+        if: always() && !cancelled() && steps.prepare-libraries.outcome != 'skipped'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ${{ env.LibrariesPath }}\*
+            !${{ env.LibrariesPath }}\cache_keys
+            !${{ env.LibrariesPath }}\[qQ]t[_-]*
+            ${{ env.LibrariesPath }}\cache_keys\*
+            !${{ env.LibrariesPath }}\cache_keys\[qQ]t[_-]*
+          key: ${{ runner.OS }}-${{ matrix.arch }}-libs-v2-${{ env.CACHE_KEY }}-${{ github.run_id }}
+
+      - name: Save prepared Qt for compiler retries.
+        if: always() && !cancelled() && steps.prepare-libraries.outcome != 'skipped'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ${{ env.LibrariesPath }}\[qQ]t[_-]*
+            ${{ env.LibrariesPath }}\cache_keys\[qQ]t[_-]*
+          key: ${{ runner.OS }}-${{ matrix.arch }}-${{ matrix.qt || 'qt' }}-${{ env.CACHE_KEY }}-${{ github.run_id }}
 
       - name: Read configuration matrix.
         shell: bash
@@ -248,16 +282,16 @@ jobs:
           cmake --build ..\out --config Debug --parallel
 
       - name: Move artifact.
-        if: (env.UPLOAD_ARTIFACT == 'true') || (github.ref == 'refs/heads/nightly')
+        if: env.ONLY_CACHE == 'false' && ((env.UPLOAD_ARTIFACT == 'true') || (github.ref == 'refs/heads/nightly'))
         run: |
           set OUT=%TBUILD%\%REPO_NAME%\out\Debug
           mkdir artifact
           move %OUT%\Telegram.exe artifact/
-          move %OUT%\Updater.exe artifact/
+          if exist %OUT%\Updater.exe move %OUT%\Updater.exe artifact/
       - uses: actions/upload-artifact@v7
         name: Upload artifact.
-        if: (env.UPLOAD_ARTIFACT == 'true') || (github.ref == 'refs/heads/nightly')
+        if: env.ONLY_CACHE == 'false' && ((env.UPLOAD_ARTIFACT == 'true') || (github.ref == 'refs/heads/nightly'))
         with:
           name: ${{ env.ARTIFACT_NAME }}
           path: artifact\
-          retention-days: 1
+          retention-days: 14
