@@ -279,14 +279,19 @@ jobs:
           -D DESKTOP_APP_DISABLE_CRASH_REPORTS=OFF ^
           %TDESKTOP_BUILD_DEFINE%
 
-          cmake --build ..\out --config Debug --parallel
+          if errorlevel 1 exit /b 1
+          if "${{ matrix.generator }}" == "Ninja Multi-Config" (
+            cmake --build ..\out --config Debug --parallel -- -k 0
+          ) else (
+            cmake --build ..\out --config Debug --parallel
+          )
 
       - name: Move artifact.
         if: env.ONLY_CACHE == 'false' && ((env.UPLOAD_ARTIFACT == 'true') || (github.ref == 'refs/heads/nightly'))
         run: |
           set OUT=%TBUILD%\%REPO_NAME%\out\Debug
           mkdir artifact
-          move %OUT%\Telegram.exe artifact/
+          move %OUT%\Leemen.exe artifact/
           if exist %OUT%\Updater.exe move %OUT%\Updater.exe artifact/
       - uses: actions/upload-artifact@v7
         name: Upload artifact.

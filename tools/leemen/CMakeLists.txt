@@ -67,6 +67,25 @@ add_executable(leemen_max_privacy_tests
     "${leemen_source_root}/test/leemen/max_privacy_tests.cpp"
 )
 target_link_libraries(leemen_max_privacy_tests PRIVATE OpenSSL::Crypto leemen::sodium)
+add_executable(leemen_private_message_policy_tests
+    "${leemen_source_root}/leemen/sync_blob.cpp"
+    "${leemen_source_root}/leemen/sync_identifiers.cpp"
+    "${leemen_source_root}/test/leemen/private_message_policy_tests.cpp"
+)
+add_executable(leemen_private_accounts_tests
+    "${leemen_source_root}/leemen/private_accounts_state.cpp"
+    "${leemen_source_root}/test/leemen/private_accounts_state_tests.cpp"
+)
+add_executable(leemen_sync_session_snapshot_tests
+    "${leemen_source_root}/leemen/sync_session_snapshot.cpp"
+    "${leemen_source_root}/leemen/sync_coordinator.cpp"
+    "${leemen_source_root}/leemen/sync_backend.cpp"
+    "${leemen_source_root}/leemen/sync_blob.cpp"
+    "${leemen_source_root}/leemen/sync_identifiers.cpp"
+    "${leemen_source_root}/leemen/sync_crypto.cpp"
+    "${leemen_source_root}/test/leemen/sync_session_snapshot_tests.cpp"
+)
+target_link_libraries(leemen_sync_session_snapshot_tests PRIVATE OpenSSL::Crypto leemen::sodium)
 
 foreach(leemen_test IN ITEMS
         leemen_private_space_tests
@@ -78,6 +97,9 @@ foreach(leemen_test IN ITEMS
         leemen_sync_local_intents_tests
         leemen_security_policy_tests
         leemen_max_privacy_tests
+        leemen_private_message_policy_tests
+        leemen_private_accounts_tests
+        leemen_sync_session_snapshot_tests
         leemen_sync_crypto_tests
         leemen_sync_backend_tests)
     target_include_directories(${leemen_test} PRIVATE "${leemen_source_root}")

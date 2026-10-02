@@ -6,6 +6,7 @@ For license and copyright information please follow this link:
 https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "window/notifications_manager.h"
+#include "leemen/leemen_private_accounts.h"
 
 #include "base/options.h"
 #include "base/platform/base_platform_info.h"
@@ -353,6 +354,7 @@ System::SkipState System::computeSkipState(
 		? item->specialNotificationPeer()
 		: notification.reactionOrVoteSender;
 	if (Core::Quitting()
+		|| !Leemen::PrivateAccountNotificationsAllowed(&thread->session())
 		|| item->isHiddenSavedMessage()
 		|| item->history()->session().leemen().hidden(
 			item->history()->peer->id)) {
@@ -691,7 +693,8 @@ void System::showGrouped() {
 	if (const auto session = findSession(_lastHistorySessionId)) {
 		if (const auto lastItem = session->data().message(_lastHistoryItemId)) {
 			_waitForAllGroupedTimer.cancel();
-			if (!lastItem->isHiddenSavedMessage()
+			if (Leemen::PrivateAccountNotificationsAllowed(session)
+				&& !lastItem->isHiddenSavedMessage()
 				&& !session->leemen().hidden(lastItem->history()->peer->id)) {
 				_manager->showNotification({
 					.item = lastItem,
@@ -756,6 +759,7 @@ void System::showNext() {
 	}
 	const auto &settings = Core::App().settings();
 	if (alertThread
+		&& Leemen::PrivateAccountNotificationsAllowed(&alertThread->session())
 		&& !alertThread->session().leemen().hidden(alertThread->peer()->id)) {
 		if (settings.flashBounceNotify()) {
 			const auto peer = alertThread->peer();
@@ -849,7 +853,8 @@ void System::showNext() {
 			break;
 		}
 		const auto notifyItem = notify->item;
-		if (notifyItem->isHiddenSavedMessage()
+		if (!Leemen::PrivateAccountNotificationsAllowed(&notifyThread->session())
+			|| notifyItem->isHiddenSavedMessage()
 			|| notifyItem->history()->session().leemen().hidden(
 				notifyItem->history()->peer->id)) {
 			notifyThread->clearNotifications();
@@ -1298,7 +1303,8 @@ void Manager::notificationActivated(
 		ActivateOptions &&options) {
 	onBeforeNotificationActivated(id);
 	if (const auto session = system()->findSession(id.contextId.sessionId)) {
-		if (session->leemen().hidden(id.contextId.peerId)) {
+		if (!Leemen::PrivateAccountNotificationsAllowed(session)
+			|| session->leemen().hidden(id.contextId.peerId)) {
 			return;
 		}
 		const auto history = session->data().history(
@@ -1354,7 +1360,8 @@ Window::SessionController *Manager::openNotificationMessage(
 		not_null<History*> history,
 		MsgId messageId,
 		bool openSeparated) {
-	if (history->session().leemen().hidden(history->peer->id)) {
+	if (!Leemen::PrivateAccountNotificationsAllowed(&history->session())
+		|| history->session().leemen().hidden(history->peer->id)) {
 		return nullptr;
 	}
 	if (Core::App().passcodeLocked()) {
@@ -1452,7 +1459,8 @@ void Manager::notificationReplied(
 	}
 
 	const auto session = system()->findSession(id.contextId.sessionId);
-	if (!session || session->leemen().hidden(id.contextId.peerId)) {
+	if (!session || !Leemen::PrivateAccountNotificationsAllowed(session)
+		|| session->leemen().hidden(id.contextId.peerId)) {
 		return;
 	}
 	const auto history = session->data().history(id.contextId.peerId);
@@ -1511,7 +1519,8 @@ void Manager::notificationActionActivated(
 		return;
 	}
 	const auto session = system()->findSession(id.contextId.sessionId);
-	if (!session || session->leemen().hidden(id.contextId.peerId)) {
+	if (!session || !Leemen::PrivateAccountNotificationsAllowed(session)
+		|| session->leemen().hidden(id.contextId.peerId)) {
 		return;
 	}
 	const auto history = session->data().history(id.contextId.peerId);

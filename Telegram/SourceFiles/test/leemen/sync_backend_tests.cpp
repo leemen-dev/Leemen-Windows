@@ -377,6 +377,46 @@ void TestMaximumPrivacy() {
 	Check(ParseWrapReceipt(409, R"({"error":{"code":"not_in_default_mode"}})").failure.kind == FailureKind::Rejected, "mode race requires fresh key fetch");
 }
 
+void TestRequiredConsent() {
+	auto me = MeReply();
+	Check(!HasRequiredConsents(me), "missing terms fail closed");
+	me.consents["terms"] = { true, std::string(kCurrentTermsVersion) };
+	Check(HasRequiredConsents(me), "already accepted ledger bypasses repeat prompt");
+	me.account.kzConsentRequired = true;
+	Check(!HasRequiredConsents(me), "required cross-border disclosure needs its own ledger entry");
+	me.consents["kz_cross_border"] = { true, std::string(kCurrentTermsVersion) };
+	Check(HasRequiredConsents(me), "both required ledger records accepted");
+	for (const auto *type : { "terms", "kz_cross_border" }) {
+		me.consents[type].granted = false;
+		Check(!HasRequiredConsents(me), "revocation closes consent gate");
+		me.consents[type].granted = true;
+		for (const auto version : { "", "2026-06-18", "2027-01-01", "2026-08-21 " }) {
+			me.consents[type].version = version;
+			Check(!HasRequiredConsents(me), "only exact published version is accepted");
+		}
+		me.consents[type].version = kCurrentTermsVersion;
+	}
+	me.consents["analytics"] = me.consents["attribution"] = { false, std::string(kCurrentTermsVersion) };
+	Check(HasRequiredConsents(me), "telemetry refusal never blocks private space");
+	for (const auto type : { ConsentType::Terms, ConsentType::KzCrossBorder }) {
+		for (const auto locale : { "ru", "en" }) {
+			const auto request = Request(EncodeConsentRequest(type, locale));
+			const auto &fields = Fields(request);
+			Check(fields.size() == 4, "consent sends only type grant version locale, no client timestamp");
+			Check(std::get<std::string>(fields.at("type").value)
+				== (type == ConsentType::Terms ? "terms" : "kz_cross_border"), "consent type exact");
+			Check(std::get<bool>(fields.at("granted").value), "explicit required consent grant");
+			Check(std::get<std::string>(fields.at("version").value) == "2026-08-21", "Android current terms version exact");
+			Check(std::get<std::string>(fields.at("locale").value) == locale, "disclosed document locale retained");
+		}
+	}
+	Check(!HasCurrentConsent(me, ConsentType(99)), "unknown consent enum cannot become terms grant");
+	Check(!EncodeConsentRequest(ConsentType(99), "en"), "unknown consent type rejected");
+	for (const auto locale : { "", "EN", "ru-RU", "../en", "analytics" }) {
+		Check(!EncodeConsentRequest(ConsentType::Terms, locale), "unsupported or injected locale rejected");
+	}
+}
+
 } // namespace
 
 int main() {
@@ -389,5 +429,6 @@ int main() {
 	TestMeAndEntitlements();
 	TestRequests();
 	TestMaximumPrivacy();
+	TestRequiredConsent();
 	std::cout << "Sync backend checks passed: " << Checks << '\n';
 }

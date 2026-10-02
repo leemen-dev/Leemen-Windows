@@ -8,6 +8,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #pragma once
 
 #include "mtproto/sender.h"
+#include "data/data_peer_id.h"
 
 namespace crl {
 class semaphore;
@@ -170,6 +171,10 @@ private:
 		CallType type,
 		StartOutgoingCallArgs);
 	void destroyCall(not_null<Call*> call);
+	void watchPrivateCall(not_null<Call*> call);
+	void watchPrivateGroupCall(
+		not_null<GroupCall*> call,
+		std::vector<PeerId> participants = {});
 	void finishConferenceInvitations(const StartConferenceInfo &args);
 
 	void createGroupCall(

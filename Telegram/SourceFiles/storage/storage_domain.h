@@ -24,6 +24,7 @@ enum class StartResult : uchar {
 	Success,
 	IncorrectPasscode,
 	IncorrectPasscodeLegacy,
+	CorruptPrivateAccounts,
 };
 
 class Domain final {
@@ -35,7 +36,8 @@ public:
 	void startAdded(
 		not_null<Main::Account*> account,
 		std::unique_ptr<MTP::Config> config);
-	void writeAccounts();
+	void writeAccounts(bool sync = false);
+	[[nodiscard]] bool writePrivateAccountsSync(const QByteArray &expected);
 	void startFromScratch();
 
 	[[nodiscard]] bool checkPasscode(const QByteArray &passcode) const;
@@ -51,7 +53,7 @@ private:
 	enum class StartModernResult {
 		Success,
 		IncorrectPasscode,
-		Failed,
+		CorruptPrivateAccounts,
 		Empty,
 	};
 

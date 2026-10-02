@@ -100,6 +100,7 @@ QByteArray SessionSettings::serialize() const {
 	}
 
 	size += Serialize::bytearraySize(leemenPrivateSpace);
+	size += Serialize::bytearraySize(_leemenSync);
 
 	auto result = QByteArray();
 	result.reserve(size);
@@ -193,6 +194,7 @@ QByteArray SessionSettings::serialize() const {
 			stream << quint64(id.custom()) << id.emoji();
 		}
 		stream << leemenPrivateSpace;
+		stream << _leemenSync;
 	}
 
 	Ensures(result.size() == size);
@@ -757,6 +759,9 @@ void SessionSettings::addFromSerialized(const QByteArray &serialized) {
 		if (stream.status() != QDataStream::Ok) {
 			_leemenPrivateSpace = QByteArray(1, char(0xff));
 		}
+	}
+	if (!stream.atEnd()) {
+		stream >> _leemenSync;
 	}
 	if (stream.status() != QDataStream::Ok) {
 		LOG(("App Error: "

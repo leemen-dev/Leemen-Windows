@@ -1160,9 +1160,7 @@ const StoriesSource *Stories::source(PeerId id) const {
 const std::vector<StoriesSourceInfo> &Stories::sources(
 		StorySourcesList list) const {
 	const auto index = static_cast<int>(list);
-	return session().leemen().configured()
-		? _visibleSources[index]
-		: _sources[index];
+	return _visibleSources[index];
 }
 
 bool Stories::sourcesLoaded(StorySourcesList list) const {

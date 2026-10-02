@@ -33,6 +33,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "data/data_changes.h"
 #include "data/data_chat_participant_status.h"
 #include "data/data_drafts.h"
+#include "leemen/leemen_private_space.h"
 #include "data/data_document.h"
 #include "data/data_file_origin.h"
 #include "data/data_forum_topic.h"
@@ -605,6 +606,9 @@ public:
 		ComposeBoxOptions options,
 		base::weak_ptr<Window::SessionController> controller) {
 		const auto history = action.history;
+		if (!session->leemen().allowsPeer(history->peer->id)) {
+			return;
+		}
 		auto composeThreadKey = std::optional<ComposeThreadKey>();
 		auto page = std::make_shared<RichPage>();
 		auto hasRichDraft = false;
@@ -622,7 +626,7 @@ public:
 					return;
 				}
 			}
-			const auto cloudDraft = history->cloudDraft(
+			const auto cloudDraft = history->composeCloudDraft(
 				topicRootId,
 				monoforumPeerId);
 			hasRichDraft = cloudDraft && cloudDraft->hasRichMessage();
@@ -666,6 +670,11 @@ public:
 		not_null<HistoryItem*> item,
 		std::shared_ptr<const RichPage> richPage,
 		base::weak_ptr<Window::SessionController> controller) {
+		const auto history = item->history();
+		if (!history->session().leemen().allowsPeer(history->peer->id)
+			|| item->isHiddenSavedMessage()) {
+			return;
+		}
 		if (ActivateEditWindow(&item->history()->session(), item->fullId())) {
 			return;
 		}
@@ -703,6 +712,10 @@ public:
 			Fn<void()> fieldMigratedOverride,
 			base::weak_ptr<Window::SessionController> controller) {
 		const auto session = &item->history()->session();
+		if (!session->leemen().allowsPeer(item->history()->peer->id)
+			|| item->isHiddenSavedMessage()) {
+			return;
+		}
 		if (ActivateEditWindow(session, item->fullId())) {
 			return;
 		}
@@ -2006,6 +2019,16 @@ public:
 		}
 	}
 
+	static void CloseForSession(not_null<Main::Session*> session) {
+		const auto live = Live();
+		for (const auto &weak : live) {
+			const auto strong = weak.lock();
+			if (strong && strong->_session == session) {
+				strong->forceClose();
+			}
+		}
+	}
+
 	[[nodiscard]] static ArticleSession *FindEditWindow(
 		not_null<Main::Session*> session,
 		FullMsgId itemId);
@@ -2046,6 +2069,16 @@ private:
 				strong->forceClose();
 			}
 		}, _lifetime);
+		_session->leemen().changes(
+		) | rpl::on_next([weak = weak_from_this()] {
+			if (const auto strong = weak.lock()) {
+				const auto item = strong->currentSubmittedItem();
+				if (!strong->_session->leemen().allowsPeer(strong->_peer->id)
+					|| (item && item->isHiddenSavedMessage())) {
+					strong->forceClose(true);
+				}
+			}
+		}, _lifetime);
 	}
 
 	// Destroys the editor window synchronously and releases the self-hold.
@@ -2059,19 +2092,22 @@ private:
 	// and mirrored to the local draft / input field, while the server
 	// save is only scheduled (it fires after unlock and simply never
 	// happens during logout or shutdown).
-	void forceClose() {
+	void forceClose(bool discardDraft = false) {
 		if (!_windowHost && !_backgroundHold) {
 			return;
 		}
 		cancelRichDraftAutosave();
 		cancelCloseWithDraftSave(_closeDraftSaveGeneration);
-		if (detachedCompose()
+		if (discardDraft) {
+			dropDetachedReturnText();
+		}
+		if (!discardDraft && detachedCompose()
 			&& _composeOptions.returnText
 			&& !_submittedPage
 			&& !_submitApiRequested) {
 			deliverDetachedReturnText();
 		}
-		const auto sync = _composeAction
+		const auto sync = !discardDraft && _composeAction
 			&& _composeThreadKey
 			&& !_submittedPage
 			&& !_submitApiRequested;
@@ -4406,7 +4442,7 @@ std::optional<::Data::Draft> ArticleSession::prepareRichDraftForAutosave() const
 	const auto topicRootId = _composeThreadKey->draftKey.topicRootId();
 	const auto monoforumPeerId = _composeThreadKey->draftKey.monoforumPeerId();
 	const auto history = _composeAction->history;
-	const auto cloudDraft = history->cloudDraft(topicRootId, monoforumPeerId);
+	const auto cloudDraft = history->composeCloudDraft(topicRootId, monoforumPeerId);
 	auto draft = cloudDraft
 		? *cloudDraft
 		: ::Data::Draft(
@@ -4479,6 +4515,10 @@ void ArticleSession::saveRichDraftNow() {
 	if (!cloudDraft) {
 		return;
 	}
+	if (history->privateDraftsActive()) {
+		_richDraftAutosaveRetryPending = false;
+		return;
+	}
 	_richDraftAutosaveRetryPending = (_session->api().saveDraftToCloud(
 		not_null{ thread },
 		*cloudDraft) == 0);
@@ -4537,6 +4577,14 @@ void ArticleSession::saveRichDraftForClose(uint64 generation) {
 	}
 	_closeDraftSaveWaiting = false;
 	_richDraftAutosaveRetryPending = false;
+	if (history->privateDraftsActive()) {
+		crl::on_main(this, [weak = weak_from_this(), generation] {
+			if (const auto strong = weak.lock()) {
+				strong->closeWithDraftSaveDone(generation);
+			}
+		});
+		return;
+	}
 	_closeDraftSaveRequestId = _session->api().saveDraftToCloud(
 		not_null{ thread },
 		*cloudDraft,
@@ -4622,7 +4670,7 @@ void ArticleSession::syncFieldWithCloudDraftAfterClose() {
 	const auto history = _composeAction->history;
 	const auto topicRootId = _composeThreadKey->draftKey.topicRootId();
 	const auto monoforumPeerId = _composeThreadKey->draftKey.monoforumPeerId();
-	if (history->cloudDraft(topicRootId, monoforumPeerId)) {
+	if (history->composeCloudDraft(topicRootId, monoforumPeerId)) {
 		history->applyCloudDraft(topicRootId, monoforumPeerId);
 	}
 }
@@ -5114,6 +5162,10 @@ rpl::producer<bool> FieldVisibleValue(
 
 void CloseAllWindows() {
 	ArticleSession::CloseAll();
+}
+
+void CloseWindowsForSession(not_null<Main::Session*> session) {
+	ArticleSession::CloseForSession(session);
 }
 
 } // namespace Iv::Editor

@@ -82,27 +82,38 @@ const SyncPair *SyncCoordinator::pendingMutation() const {
 }
 
 SyncCheckpoint SyncCoordinator::checkpoint() const {
-	return { _pending, _authorizedPin };
+	return { _pending, _authorizedPin, _filterVersionFloor, _contentVersionFloor };
 }
 
 bool SyncCoordinator::restoreCheckpoint(SyncCheckpoint checkpoint) {
 	close();
-	if (!checkpoint.pending) {
-		return !checkpoint.authorizedPin;
-	}
-	const auto &pair = *checkpoint.pending;
-	auto expectedPin = ContentBlob();
-	expectedPin.pin = checkpoint.authorizedPin;
-	if (pair.filterVersion < 0 || pair.filterVersion > kMaximumVersion
-		|| pair.contentVersion < 0 || pair.contentVersion > kMaximumVersion
-		|| !EncodeFilterBlob(pair.filter)
-		|| !EncodeContentBlob(pair.content)
-		|| !EncodeContentBlob(expectedPin)) {
+	if (checkpoint.filterVersionFloor < 0
+		|| checkpoint.filterVersionFloor > kMaximumVersion
+		|| checkpoint.contentVersionFloor < 0
+		|| checkpoint.contentVersionFloor > kMaximumVersion
+		|| (!checkpoint.pending && checkpoint.authorizedPin)) {
 		block(SyncFailure::InvalidData);
 		return false;
 	}
+	auto expectedPin = ContentBlob();
+	expectedPin.pin = checkpoint.authorizedPin;
+	if (checkpoint.pending) {
+		const auto &pair = *checkpoint.pending;
+		if (pair.filterVersion < 0 || pair.filterVersion > kMaximumVersion
+			|| pair.contentVersion < 0 || pair.contentVersion > kMaximumVersion
+			|| !EncodeFilterBlob(pair.filter)
+			|| !EncodeContentBlob(pair.content)
+			|| !EncodeContentBlob(expectedPin)) {
+			block(SyncFailure::InvalidData);
+			return false;
+		}
+		checkpoint.filterVersionFloor = std::max(checkpoint.filterVersionFloor, pair.filterVersion);
+		checkpoint.contentVersionFloor = std::max(checkpoint.contentVersionFloor, pair.contentVersion);
+	}
 	_pending = std::move(checkpoint.pending);
 	_authorizedPin = std::move(checkpoint.authorizedPin);
+	_filterVersionFloor = checkpoint.filterVersionFloor;
+	_contentVersionFloor = checkpoint.contentVersionFloor;
 	return true;
 }
 
@@ -207,14 +218,16 @@ std::vector<SyncRequest> SyncCoordinator::reconcile() {
 			: SyncFailure::InvalidData);
 		return {};
 	}
-	const auto filterFloor = std::max(_remote.filterVersion,
+	const auto filterFloor = std::max(_filterVersionFloor,
 		_pending ? _pending->filterVersion : std::int64_t(0));
-	const auto contentFloor = std::max(_remote.contentVersion,
+	const auto contentFloor = std::max(_contentVersionFloor,
 		_pending ? _pending->contentVersion : std::int64_t(0));
 	if (_filterRead->version < filterFloor || _contentRead->version < contentFloor) {
 		block(SyncFailure::InvalidData);
 		return {};
 	}
+	_filterVersionFloor = _filterRead->version;
+	_contentVersionFloor = _contentRead->version;
 	if (_pending && content.blob->pin != _authorizedPin) {
 		block(SyncFailure::AuthorizationChanged);
 		return {};
@@ -306,10 +319,12 @@ std::vector<SyncRequest> SyncCoordinator::acceptWrite(
 		_remote.filter = _pending->filter;
 		_remote.filterVersion = version;
 		_pending->filterVersion = version;
+		_filterVersionFloor = version;
 	} else {
 		_remote.content = _pending->content;
 		_remote.contentVersion = version;
 		_pending->contentVersion = version;
+		_contentVersionFloor = version;
 		_authorizedPin = _remote.content.pin;
 	}
 	return nextWrite();
@@ -330,6 +345,8 @@ void SyncCoordinator::close() {
 	_remote = SyncPair();
 	_pending.reset();
 	_authorizedPin.reset();
+	_filterVersionFloor = 0;
+	_contentVersionFloor = 0;
 }
 
 void SyncCoordinator::discardPendingMutation() {

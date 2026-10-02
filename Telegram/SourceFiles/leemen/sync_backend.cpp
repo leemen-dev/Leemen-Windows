@@ -543,6 +543,33 @@ std::optional<SecretBytes> EncodeDefaultWrapRequest(std::span<const unsigned cha
 	return EncodeRequest(std::move(object));
 }
 
+bool HasCurrentConsent(const MeReply &reply, ConsentType type) {
+	if (type != ConsentType::Terms && type != ConsentType::KzCrossBorder) {
+		return false;
+	}
+	const auto i = reply.consents.find(type == ConsentType::Terms ? "terms" : "kz_cross_border");
+	return i != reply.consents.end() && i->second.granted
+		&& i->second.version == kCurrentTermsVersion;
+}
+
+bool HasRequiredConsents(const MeReply &reply) {
+	return HasCurrentConsent(reply, ConsentType::Terms)
+		&& (!reply.account.kzConsentRequired || HasCurrentConsent(reply, ConsentType::KzCrossBorder));
+}
+
+std::optional<SecretBytes> EncodeConsentRequest(ConsentType type, std::string_view locale) {
+	if ((type != ConsentType::Terms && type != ConsentType::KzCrossBorder)
+		|| (locale != "ru" && locale != "en")) {
+		return std::nullopt;
+	}
+	return EncodeRequest({
+		{ "type", Text(type == ConsentType::Terms ? "terms" : "kz_cross_border") },
+		{ "granted", JsonValue{ true } },
+		{ "version", Text(std::string(kCurrentTermsVersion)) },
+		{ "locale", Text(std::string(locale)) },
+	});
+}
+
 std::optional<SecretBytes> EncodeUpgradePrivacyRequest(
 		std::span<const unsigned char> wrappedPassword,
 		std::span<const unsigned char> passwordSalt,

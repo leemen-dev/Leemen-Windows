@@ -672,7 +672,8 @@ void SavedSublist::readTill(MsgId tillId) {
 void SavedSublist::readTill(
 		MsgId tillId,
 		HistoryItem *tillIdItem) {
-	if (!IsServerMsgId(tillId)) {
+	if (!session().leemen().allowsPeer(owningHistory()->peer->id)
+		|| !IsServerMsgId(tillId)) {
 		return;
 	}
 	if (unreadMark()) {
@@ -698,6 +699,10 @@ void SavedSublist::readTill(
 }
 
 void SavedSublist::sendReadTillRequest() {
+	if (!session().leemen().allowsPeer(owningHistory()->peer->id)) {
+		_readRequestTimer.cancel();
+		return;
+	}
 	const auto parentChat = _parent->parentChat();
 	if (!parentChat) {
 		return;

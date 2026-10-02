@@ -92,6 +92,7 @@ enum class Command {
 	SupportScrollToCurrent,
 	SupportHistoryBack,
 	SupportHistoryForward,
+	LeemenPrivateSpace,
 };
 
 [[maybe_unused]] constexpr auto kShowFolder = {

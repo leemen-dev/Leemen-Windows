@@ -10,6 +10,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "data/data_types.h"
 #include "data/data_peer.h"
 #include "data/data_drafts.h"
+#include "leemen/private_drafts.h"
 #include "data/data_thread.h"
 #include "history/view/history_view_send_action.h"
 #include "base/variant.h"
@@ -312,6 +313,8 @@ public:
 	void setUnreadPollVotesCount(int count);
 	[[nodiscard]] rpl::producer<int> unreadPollVotesCountChanges() const;
 
+	[[nodiscard]] bool privateDraftsActive() const;
+	void clearPrivateDrafts();
 	Data::Draft *draft(Data::DraftKey key) const;
 	void setDraft(Data::DraftKey key, std::unique_ptr<Data::Draft> &&draft);
 	void clearDraft(Data::DraftKey key);
@@ -335,6 +338,10 @@ public:
 			PeerId monoforumPeerId) const {
 		return draft(Data::DraftKey::Cloud(topicRootId, monoforumPeerId));
 	}
+	// Editors use a private overlay; server updates keep the ordinary bank.
+	Data::Draft *composeCloudDraft(
+		MsgId topicRootId,
+		PeerId monoforumPeerId) const;
 	void setLocalDraft(std::unique_ptr<Data::Draft> &&draft) {
 		setDraft(
 			Data::DraftKey::Local(
@@ -362,6 +369,9 @@ public:
 		clearDraft(Data::DraftKey::Local(topicRootId, monoforumPeerId));
 	}
 	void clearCloudDraft(
+		MsgId topicRootId,
+		PeerId monoforumPeerId);
+	void clearCloudDraftFromServer(
 			MsgId topicRootId,
 			PeerId monoforumPeerId) {
 		clearDraft(Data::DraftKey::Cloud(topicRootId, monoforumPeerId));
@@ -387,6 +397,7 @@ public:
 		TimeId savedAt);
 	void takeLocalDraft(not_null<History*> from);
 	void applyCloudDraft(MsgId topicRootId, PeerId monoforumPeerId);
+	void applyCloudDraftFromServer(MsgId topicRootId, PeerId monoforumPeerId);
 	void draftSavedToCloud(MsgId topicRootId, PeerId monoforumPeerId);
 	void requestChatListMessage();
 
@@ -709,6 +720,10 @@ private:
 	std::unique_ptr<HistoryTranslation> _translation;
 
 	Data::HistoryDrafts _drafts;
+	mutable Leemen::PrivateDrafts<Data::DraftKey, Data::Draft> _privateDrafts;
+	mutable Leemen::PrivateDrafts<
+		Data::DraftKey,
+		Data::ForwardDraft> _privateForwardDrafts;
 	base::flat_map<Data::DraftKey, TimeId> _acceptCloudDraftsAfter;
 	base::flat_map<Data::DraftKey, int> _savingCloudDraftRequests;
 	base::flat_map<Data::DraftKey, Data::ForwardDraft> _forwardDrafts;

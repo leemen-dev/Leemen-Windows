@@ -6,6 +6,7 @@ For license and copyright information please follow this link:
 https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "settings/sections/settings_information.h"
+#include "leemen/leemen_private_accounts.h"
 
 #include "settings/sections/settings_main.h"
 #include "settings/settings_builder.h"
@@ -1021,6 +1022,8 @@ void AccountsList::setup() {
 		rebuild();
 	}, _outer->lifetime());
 
+	Core::App().domain().privateAccounts().changes() | rpl::on_next([=] { rebuild(); }, _outer->lifetime());
+
 	Core::App().domain().maxAccountsChanges(
 	) | rpl::on_next([=] {
 		for (auto i = _watched.begin(); i != _watched.end(); i++) {
@@ -1141,7 +1144,8 @@ void AccountsList::rebuild() {
 		Assert(i != _watched.end());
 
 		auto &button = i->second;
-		if (!account->sessionExists() || list.size() == 1) {
+		if (!account->sessionExists() || list.size() == 1
+			|| !Leemen::PrivateAccountVisibleFrom(&_controller->session().account(), account)) {
 			button = nullptr;
 		} else if (!button) {
 			const auto nextIsLocked = (inner->count() >= premiumLimit);

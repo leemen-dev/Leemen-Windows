@@ -132,6 +132,9 @@ struct Consent {
 	std::string version;
 };
 
+inline constexpr auto kCurrentTermsVersion = std::string_view("2026-08-21");
+enum class ConsentType { Terms, KzCrossBorder };
+
 struct MeReply {
 	std::optional<std::int64_t> serverNowMs;
 	AccountMetadata account;
@@ -159,6 +162,11 @@ struct PremiumStatus {
 [[nodiscard]] Reply<std::string> ParseSessionStatus(int httpStatus, std::string_view body);
 [[nodiscard]] Reply<bool> ParseOk(int httpStatus, std::string_view body);
 [[nodiscard]] std::optional<PremiumStatus> PremiumAtServerTime(const MeReply &reply);
+[[nodiscard]] bool HasCurrentConsent(const MeReply &reply, ConsentType type);
+[[nodiscard]] bool HasRequiredConsents(const MeReply &reply);
+[[nodiscard]] std::optional<SecretBytes> EncodeConsentRequest(
+	ConsentType type,
+	std::string_view locale);
 
 [[nodiscard]] std::optional<SecretBytes> EncodeAuthRequest(
 	std::string_view initData,

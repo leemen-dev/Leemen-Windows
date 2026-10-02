@@ -3128,6 +3128,7 @@ void HistoryItem::setRealId(MsgId newId) {
 	Expects(IsClientMsgId(id));
 
 	const auto oldId = std::exchange(id, newId);
+	_history->session().leemen().replacePrivateMessageId(FullMsgId(_history->peer->id, oldId), newId);
 	_flags &= ~(MessageFlag::BeingSent | MessageFlag::Local);
 	if (textAppearing()) {
 		markTextAppearingStarted();
@@ -4721,6 +4722,9 @@ bool HistoryItem::isHiddenSavedMessage() const {
 		return false;
 	}
 	const auto &space = _history->session().leemen();
+	if (!space.allowsPeer(_history->peer->id)) {
+		return true;
+	}
 	if (!space.configured() || space.active()) {
 		return false;
 	}
@@ -5928,6 +5932,12 @@ void HistoryItem::createServiceFromMtp(const MTPDmessageService &message) {
 	}
 
 	setServiceMessageByAction(action);
+	if (const auto pinned = Get<HistoryServicePinned>(); pinned && pinned->msgId) {
+		_history->session().leemen().markOffModePinService(
+			fullId(),
+			FullMsgId(pinned->peerId ? pinned->peerId : _history->peer->id, pinned->msgId),
+			out());
+	}
 }
 
 void HistoryItem::setMedia(const MTPMessageMedia &media) {

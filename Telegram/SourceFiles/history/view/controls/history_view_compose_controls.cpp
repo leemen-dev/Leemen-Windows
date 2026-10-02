@@ -2542,7 +2542,7 @@ void ComposeControls::saveFieldToHistoryLocalDraft(bool save) {
 
 Data::Draft *ComposeControls::cloudDraft() const {
 	return _history
-		? _history->cloudDraft(_topicRootId, _monoforumPeerId)
+		? _history->composeCloudDraft(_topicRootId, _monoforumPeerId)
 		: nullptr;
 }
 

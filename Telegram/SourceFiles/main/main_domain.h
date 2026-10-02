@@ -19,6 +19,10 @@ namespace MTP {
 enum class Environment : uchar;
 } // namespace MTP
 
+namespace Leemen {
+class PrivateAccounts;
+} // namespace Leemen
+
 namespace Main {
 
 class Account;
@@ -48,10 +52,12 @@ public:
 	[[nodiscard]] Storage::Domain &local() const {
 		return *_local;
 	}
+	[[nodiscard]] Leemen::PrivateAccounts &privateAccounts() const;
 
 	[[nodiscard]] auto accounts() const
 		-> const std::vector<AccountWithIndex> &;
 	[[nodiscard]] std::vector<not_null<Account*>> orderedAccounts() const;
+	[[nodiscard]] std::vector<not_null<Account*>> nonHiddenAccounts() const;
 	[[nodiscard]] rpl::producer<Account*> activeValue() const;
 	[[nodiscard]] rpl::producer<> accountsChanges() const;
 	[[nodiscard]] Account *maybeLastOrSomeAuthedAccount();
@@ -59,6 +65,7 @@ public:
 
 	// Expects(started());
 	[[nodiscard]] Account &active() const;
+	[[nodiscard]] Account *maybeActive() const;
 	[[nodiscard]] rpl::producer<not_null<Account*>> activeChanges() const;
 
 	[[nodiscard]] rpl::producer<Session*> activeSessionValue() const;
@@ -95,6 +102,7 @@ private:
 
 	const QString _dataName;
 	const std::unique_ptr<Storage::Domain> _local;
+	const std::unique_ptr<Leemen::PrivateAccounts> _privateAccounts;
 
 	std::vector<AccountWithIndex> _accounts;
 	rpl::event_stream<> _accountsChanges;

@@ -43,6 +43,12 @@ public:
 	void setLeemenPrivateSpace(QByteArray value) {
 		_leemenPrivateSpace = std::move(value);
 	}
+	[[nodiscard]] const QByteArray &leemenSync() const {
+		return _leemenSync;
+	}
+	void setLeemenSync(QByteArray value) {
+		_leemenSync = std::move(value);
+	}
 
 	void setSupportSwitch(Support::SwitchSettings value) {
 		_supportSwitch = value;
@@ -261,6 +267,7 @@ private:
 
 	std::vector<Data::ReactionId> _extraFavoriteReactions;
 	QByteArray _leemenPrivateSpace;
+	QByteArray _leemenSync;
 	bool _sessionSettingsReadFailed = false;
 
 };

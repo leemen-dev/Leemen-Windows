@@ -17,7 +17,9 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "data/data_thread.h"
 #include "history/history.h"
 #include "main/main_account.h"
+#include "main/main_domain.h"
 #include "main/main_session.h"
+#include "leemen/leemen_private_accounts.h"
 #include "window/window_lock_widgets.h"
 
 namespace Window {
@@ -109,7 +111,8 @@ bool SeparateWindowLocked(SeparateId id) {
 }
 
 bool CanShowSeparateWindow(SeparateId id) {
-	return SeparateWindowThreadAvailable(id) && !SeparateWindowLocked(id);
+	return (!id.account || !id.account->domain().privateAccounts().hidden(id.account))
+		&& SeparateWindowThreadAvailable(id) && !SeparateWindowLocked(id);
 }
 
 } // namespace Window

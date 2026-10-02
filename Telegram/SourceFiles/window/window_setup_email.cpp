@@ -629,7 +629,7 @@ void SetupEmailLockWidget::showAccountsMenu() {
 	const auto &st = st::popupMenuWithIcons;
 
 	_accountsMenu = base::make_unique_q<Ui::PopupMenu>(this, st);
-	const auto accounts = session->domain().orderedAccounts();
+	const auto accounts = session->domain().nonHiddenAccounts();
 
 	for (const auto &account : accounts) {
 		if (!account->sessionExists()) {

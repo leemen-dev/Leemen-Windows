@@ -2944,7 +2944,7 @@ rpl::producer<TopPeersList> TopPeersContent(
 RecentPeersList RecentPeersContent(not_null<Main::Session*> session) {
 	return RecentPeersList{ session->recentPeers().list()
 		| ranges::views::filter([=](not_null<PeerData*> peer) {
-			return session->leemen().allowsPeer(peer->id);
+			return session->leemen().allowsRecentSearch(peer->id);
 		}) | ranges::to_vector };
 }
 

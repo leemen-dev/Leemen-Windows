@@ -74,6 +74,7 @@ private:
 	MsgId _offsetId = 0;
 	int _loadRequestId = 0; // Not a real mtpRequestId.
 	bool _allLoaded = false;
+	int _hiddenPagesLoaded = 0;
 
 };
 

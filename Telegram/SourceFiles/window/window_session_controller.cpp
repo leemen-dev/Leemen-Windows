@@ -2010,7 +2010,7 @@ void SessionController::setupShortcuts() {
 			ranges::views::ints(0, accountsCount));
 		for (const auto &[command, index] : accounts) {
 			request->check(command) && request->handle([=] {
-				const auto list = app->domain().orderedAccounts();
+				const auto list = app->domain().nonHiddenAccounts();
 				if (index >= list.size()) {
 					return false;
 				}

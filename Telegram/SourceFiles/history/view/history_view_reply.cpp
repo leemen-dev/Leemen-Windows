@@ -25,6 +25,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "history/history_item_components.h"
 #include "history/history_item_helpers.h"
 #include "lang/lang_keys.h"
+#include "leemen/leemen_private_space.h"
 #include "main/main_session.h"
 #include "ui/chat/chat_style.h"
 #include "ui/effects/ripple_animation.h"
@@ -48,8 +49,10 @@ constexpr auto kNonExpandedLinesLimit = 5;
 		not_null<const Element*> view,
 		not_null<HistoryMessageReply*> data) {
 	return view->history()->peer->isSelf()
-		&& data->resolvedMessage
-		&& data->resolvedMessage->isHiddenSavedMessage();
+		&& (!view->history()->session().leemen().allowsPeer(
+				data->fields().externalPeerId)
+			|| (data->resolvedMessage
+				&& data->resolvedMessage->isHiddenSavedMessage()));
 }
 
 [[nodiscard]] QImage MakeTaskImage() {

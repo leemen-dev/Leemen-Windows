@@ -7,8 +7,15 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "iv/markdown/iv_markdown_microtex.h"
 #include "base/base_file_utilities.h"
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable: 4265 5038)
+#endif // _MSC_VER
 #include "platform/qt/graphic_qt.h"
 #include "latex.h"
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif // _MSC_VER
 
 #include <QtCore/QSize>
 #include <QtCore/QString>

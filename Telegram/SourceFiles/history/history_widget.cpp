@@ -2373,7 +2373,7 @@ void HistoryWidget::saveFieldToHistoryLocalDraft() {
 }
 
 Data::Draft *HistoryWidget::cloudDraft() const {
-	return _history ? _history->cloudDraft(MsgId(), PeerId()) : nullptr;
+	return _history ? _history->composeCloudDraft(MsgId(), PeerId()) : nullptr;
 }
 
 std::shared_ptr<const Iv::RichPage> HistoryWidget::shownRichMessage() const {
@@ -3176,7 +3176,7 @@ void HistoryWidget::showHistory(
 			setFocus();
 		}
 		controller()->session().api().saveCurrentDraftToCloud();
-		if (_migrated) {
+		if (_migrated && !_migrated->privateDraftsActive()) {
 			_migrated->clearDrafts(); // use migrated draft only once
 		}
 

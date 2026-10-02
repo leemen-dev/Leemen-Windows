@@ -6,6 +6,7 @@ For license and copyright information please follow this link:
 https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "calls/calls_instance.h"
+#include "leemen/leemen_private_accounts.h"
 
 #include "calls/calls_call.h"
 #include "calls/group/calls_group_common.h"
@@ -204,7 +205,7 @@ Instance::~Instance() {
 void Instance::startOutgoingCall(
 		not_null<UserData*> user,
 		StartOutgoingCallArgs args) {
-	if (user->session().leemen().hidden(user->id)) {
+	if (!user->session().leemen().allowsPeer(user->id)) {
 		return;
 	}
 	if (activateCurrentCall()
@@ -233,7 +234,7 @@ void Instance::startOrJoinGroupCall(
 		std::shared_ptr<Ui::Show> show,
 		not_null<PeerData*> peer,
 		StartGroupCallArgs args) {
-	if (peer->session().leemen().hidden(peer->id)) {
+	if (!peer->session().leemen().allowsPeer(peer->id)) {
 		return;
 	}
 	confirmLeaveCurrent(show, peer, args, [=](StartGroupCallArgs args) {
@@ -261,6 +262,19 @@ void Instance::startOrJoinGroupCall(
 void Instance::startOrJoinConferenceCall(StartConferenceInfo args) {
 	Expects(args.call || args.show);
 
+	const auto session = args.show
+		? &args.show->session()
+		: &args.call->session();
+	const auto &space = session->leemen();
+	if (ranges::any_of(args.invite, [&](const auto &invite) {
+		return !space.allowsPeer(invite.user->id);
+	}) || (args.call && (!space.allowsPeer(args.call->peer()->id)
+		|| ranges::any_of(args.call->participants(), [&](const auto &participant) {
+			return !space.allowsPeer(participant.peer->id);
+		})))) {
+		return;
+	}
+
 	const auto migrationInfo = (args.migrating
 		&& args.call
 		&& _currentCallPanel)
@@ -270,11 +284,13 @@ void Instance::startOrJoinConferenceCall(StartConferenceInfo args) {
 		destroyCurrentCall();
 	}
 
-	const auto session = args.show
-		? &args.show->session()
-		: &args.call->session();
 	auto call = std::make_unique<GroupCall>(_delegate.get(), args);
 	const auto raw = call.get();
+	auto participants = std::vector<PeerId>();
+	for (const auto &invite : args.invite) {
+		participants.push_back(invite.user->id);
+	}
+	watchPrivateGroupCall(raw, std::move(participants));
 
 	session->account().sessionChanges(
 	) | rpl::on_next([=] {
@@ -432,7 +448,7 @@ void Instance::createCall(
 		not_null<UserData*> user,
 		CallType type,
 		StartOutgoingCallArgs args) {
-	if (user->session().leemen().hidden(user->id)) {
+	if (!user->session().leemen().allowsPeer(user->id)) {
 		return;
 	}
 	struct Performer final {
@@ -445,7 +461,7 @@ void Instance::createCall(
 			bool video,
 			bool isConfirmed,
 			const Performer &repeater) {
-		if (user->session().leemen().hidden(user->id)) {
+		if (!user->session().leemen().allowsPeer(user->id)) {
 			return;
 		}
 		const auto delegate = _delegate.get();
@@ -454,6 +470,7 @@ void Instance::createCall(
 			call->applyUserConfirmation();
 		}
 		const auto raw = call.get();
+		watchPrivateCall(raw);
 
 		user->session().account().sessionChanges(
 		) | rpl::on_next([=] {
@@ -482,6 +499,62 @@ void Instance::createCall(
 	performer.callback(args.video, args.isConfirmed, performer);
 }
 
+void Instance::watchPrivateCall(not_null<Call*> call) {
+	call->user()->session().leemen().changes(
+	) | rpl::on_next([=] {
+		const auto &space = call->user()->session().leemen();
+		const auto blocked = !space.allowsPeer(call->user()->id)
+			|| ranges::any_of(call->conferenceParticipants(), [&](const auto peer) {
+				return !space.allowsPeer(peer->id);
+			});
+		if (blocked && _currentCall.get() == call) {
+			call->hangup();
+			if (_currentCall.get() == call) {
+				destroyCall(call);
+			}
+		}
+	}, call->lifetime());
+}
+
+void Instance::watchPrivateGroupCall(
+		not_null<GroupCall*> call,
+		std::vector<PeerId> participants) {
+	const auto check = [=] {
+		const auto &space = call->peer()->session().leemen();
+		const auto shared = call->sharedCall();
+		const auto blocked = !space.allowsPeer(call->peer()->id)
+			|| ranges::any_of(participants, [&](const auto peer) {
+				return !space.allowsPeer(peer);
+			})
+			|| (call->conference() && shared
+				&& ranges::any_of(shared->participants(), [&](const auto &participant) {
+					return !space.allowsPeer(participant.peer->id);
+				}));
+		if (blocked && (_currentGroupCall.get() == call
+			|| _startingGroupCall.get() == call)) {
+			call->hangup();
+			if (_currentGroupCall.get() == call || _startingGroupCall.get() == call) {
+				destroyGroupCall(call);
+			}
+		}
+	};
+	call->peer()->session().leemen().changes(
+	) | rpl::on_next(check, call->lifetime());
+	if (!call->conference()) {
+		return;
+	}
+	call->real() | rpl::on_next([=](not_null<Data::GroupCall*> real) {
+		const auto schedule = [=] {
+			crl::on_main(call, check);
+		};
+		real->participantsReloaded(
+		) | rpl::on_next(schedule, call->lifetime());
+		real->participantUpdated(
+		) | rpl::on_next([=] { schedule(); }, call->lifetime());
+		schedule();
+	}, call->lifetime());
+}
+
 void Instance::destroyGroupCall(not_null<GroupCall*> call) {
 	if (_currentGroupCall.get() == call) {
 		_currentGroupCallPanel->closeBeforeDestroy();
@@ -503,7 +576,7 @@ void Instance::destroyGroupCall(not_null<GroupCall*> call) {
 void Instance::createGroupCall(
 		Group::JoinInfo info,
 		const MTPInputGroupCall &inputCall) {
-	if (info.peer->session().leemen().hidden(info.peer->id)) {
+	if (!info.peer->session().leemen().allowsPeer(info.peer->id)) {
 		return;
 	}
 	destroyCurrentCall();
@@ -513,6 +586,7 @@ void Instance::createGroupCall(
 		std::move(info),
 		inputCall);
 	const auto raw = call.get();
+	watchPrivateGroupCall(raw);
 
 	info.peer->session().account().sessionChanges(
 	) | rpl::on_next([=] {
@@ -694,7 +768,8 @@ void Instance::handleCallUpdate(
 		const MTPPhoneCall &call) {
 	if (call.type() == mtpc_phoneCallRequested) {
 		auto &phoneCall = call.c_phoneCallRequested();
-		if (session->leemen().hidden(peerFromUser(phoneCall.vadmin_id()))) {
+		if (!Leemen::PrivateAccountNotificationsAllowed(session)
+			|| !session->leemen().allowsPeer(peerFromUser(phoneCall.vadmin_id()))) {
 			return;
 		}
 		auto user = session->data().userLoaded(phoneCall.vadmin_id());
@@ -1188,11 +1263,14 @@ void Instance::declineOutgoingConferenceInvite(
 void Instance::showConferenceInvite(
 		not_null<UserData*> user,
 		MsgId conferenceInviteMsgId) {
+	if (!user->session().leemen().allowsPeer(user->id)) {
+		return;
+	}
 	const auto item = user->owner().message(user, conferenceInviteMsgId);
 	const auto media = item ? item->media() : nullptr;
 	const auto call = media ? media->call() : nullptr;
 	const auto conferenceId = call ? call->conferenceId : 0;
-	const auto video = call->video;
+	const auto video = call && call->video;
 	if (!conferenceId
 		|| call->state != Data::CallState::Invitation
 		|| user->isSelf()
@@ -1208,6 +1286,11 @@ void Instance::showConferenceInvite(
 	}
 
 	auto conferenceParticipants = call->otherParticipants;
+	if (ranges::any_of(conferenceParticipants, [&](const auto peer) {
+		return !user->session().leemen().allowsPeer(peer->id);
+	})) {
+		return;
+	}
 	if (!ranges::contains(conferenceParticipants, user)) {
 		conferenceParticipants.push_back(user);
 	}
@@ -1229,6 +1312,7 @@ void Instance::showConferenceInvite(
 			std::move(conferenceParticipants),
 			video);
 		const auto raw = call.get();
+		watchPrivateCall(raw);
 
 		user->session().account().sessionChanges(
 		) | rpl::on_next([=] {

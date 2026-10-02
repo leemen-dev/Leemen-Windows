@@ -13,7 +13,10 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "mtproto/mtproto_config.h"
 #include "main/main_domain.h"
 #include "main/main_account.h"
+#include "leemen/leemen_private_accounts.h"
 #include "base/random.h"
+
+#include <QtCore/QFileInfo>
 
 namespace Storage {
 namespace {
@@ -48,9 +51,8 @@ StartResult Domain::start(const QByteArray &passcode) {
 		return StartResult::Success;
 	} else if (modern == StartModernResult::IncorrectPasscode) {
 		return StartResult::IncorrectPasscode;
-	} else if (modern == StartModernResult::Failed) {
-		startFromScratch();
-		return StartResult::Success;
+	} else if (modern == StartModernResult::CorruptPrivateAccounts) {
+		return StartResult::CorruptPrivateAccounts;
 	}
 	auto legacy = std::make_unique<Main::Account>(_owner, _dataName, 0);
 	const auto result = legacy->legacyStart(passcode);
@@ -120,19 +122,30 @@ Domain::StartModernResult Domain::startModern(
 
 	FileReadDescriptor keyData;
 	if (!ReadFile(keyData, name, BaseGlobalPath())) {
+		const auto base = BaseGlobalPath() + name;
+		if (QFileInfo::exists(base + 's') || QFileInfo::exists(base + '0') || QFileInfo::exists(base + '1')) {
+			_owner->privateAccounts().blockCorruptedStartup();
+			return StartModernResult::CorruptPrivateAccounts;
+		}
 		return StartModernResult::Empty;
+	}
+	if (std::size_t(keyData.data.size()) > Leemen::kMaxPrivateAccountsBytes + 4096) {
+		_owner->privateAccounts().blockCorruptedStartup();
+		return StartModernResult::CorruptPrivateAccounts;
 	}
 	LOG(("App Info: reading accounts info..."));
 
 	QByteArray salt, keyEncrypted, infoEncrypted;
 	keyData.stream >> salt >> keyEncrypted >> infoEncrypted;
-	if (!CheckStreamStatus(keyData.stream)) {
-		return StartModernResult::Failed;
+	if (!CheckStreamStatus(keyData.stream) || !keyData.stream.atEnd()) {
+		_owner->privateAccounts().blockCorruptedStartup();
+		return StartModernResult::CorruptPrivateAccounts;
 	}
 
 	if (salt.size() != LocalEncryptSaltSize) {
 		LOG(("App Error: bad salt in info file, size: %1").arg(salt.size()));
-		return StartModernResult::Failed;
+		_owner->privateAccounts().blockCorruptedStartup();
+		return StartModernResult::CorruptPrivateAccounts;
 	}
 	_passcodeKey = CreateLocalKey(passcode, salt);
 
@@ -146,7 +159,8 @@ Domain::StartModernResult Domain::startModern(
 	if (keyInnerData.stream.status() != QDataStream::Ok
 		|| !keyInnerData.stream.atEnd()) {
 		LOG(("App Error: could not read pass-protected key from info file"));
-		return StartModernResult::Failed;
+		_owner->privateAccounts().blockCorruptedStartup();
+		return StartModernResult::CorruptPrivateAccounts;
 	}
 	_localKey = std::make_shared<MTP::AuthKey>(key);
 
@@ -156,24 +170,55 @@ Domain::StartModernResult Domain::startModern(
 
 	if (!DecryptLocal(info, infoEncrypted, _localKey)) {
 		LOG(("App Error: could not decrypt info."));
-		return StartModernResult::Failed;
+		_owner->privateAccounts().blockCorruptedStartup();
+		return StartModernResult::CorruptPrivateAccounts;
+	}
+	if (std::size_t(info.data.size()) > Leemen::kMaxPrivateAccountsBytes + 128) {
+		_owner->privateAccounts().blockCorruptedStartup();
+		return StartModernResult::CorruptPrivateAccounts;
 	}
 	LOG(("App Info: reading encrypted info..."));
 	auto count = qint32();
 	info.stream >> count;
 	if (count <= 0 || count > Main::Domain::kPremiumMaxAccounts) {
 		LOG(("App Error: bad accounts count: %1").arg(count));
-		return StartModernResult::Failed;
+		_owner->privateAccounts().blockCorruptedStartup();
+		return StartModernResult::CorruptPrivateAccounts;
 	}
 
 	_oldVersion = keyData.version;
-
-	auto tried = base::flat_set<int>();
-	auto sessions = base::flat_set<uint64>();
-	auto active = 0;
+	auto indices = std::vector<qint32>();
 	for (auto i = 0; i != count; ++i) {
 		auto index = qint32();
 		info.stream >> index;
+		indices.push_back(index);
+	}
+	auto selected = std::optional<qint32>();
+	if (!info.stream.atEnd()) {
+		auto index = qint32();
+		info.stream >> index;
+		selected = index;
+	}
+	auto privateAccounts = QByteArray();
+	if (!info.stream.atEnd()) info.stream >> privateAccounts;
+	if (info.stream.status() != QDataStream::Ok || !info.stream.atEnd()
+		|| !_owner->privateAccounts().restore(privateAccounts)) {
+		_owner->privateAccounts().blockCorruptedStartup();
+		return StartModernResult::CorruptPrivateAccounts;
+	}
+
+	auto tried = base::flat_set<int>();
+	auto sessions = base::flat_set<uint64>();
+	struct PreparedAccount {
+		int index = 0;
+		std::unique_ptr<Main::Account> account;
+		std::unique_ptr<MTP::Config> config;
+	};
+	auto prepared = std::vector<PreparedAccount>();
+	auto identities = std::vector<std::uint64_t>();
+	auto active = 0;
+	for (auto i = 0; i != count; ++i) {
+		const auto index = indices[i];
 		if (index >= 0
 			&& index < Main::Domain::kPremiumMaxAccounts
 			&& tried.emplace(index).second) {
@@ -185,34 +230,39 @@ Domain::StartModernResult Domain::startModern(
 			const auto sessionId = account->willHaveSessionUniqueId(
 				config.get());
 			if (!sessions.contains(sessionId)
-				&& (sessionId != 0 || (sessions.empty() && i + 1 == count))) {
+				&& (sessionId || (sessions.empty() && i + 1 == count)
+					|| _owner->privateAccounts().configured())) {
 				if (sessions.empty()) {
 					active = index;
 				}
-				account->start(std::move(config));
-				_owner->accountAddedInStorage({
-					.index = index,
-					.account = std::move(account)
-				});
+				prepared.push_back({ index, std::move(account), std::move(config) });
+				identities.push_back(sessionId);
 				sessions.emplace(sessionId);
 			}
 		}
 	}
 	if (sessions.empty()) {
 		LOG(("App Error: no accounts read."));
-		return StartModernResult::Failed;
+		_owner->privateAccounts().blockCorruptedStartup();
+		return StartModernResult::CorruptPrivateAccounts;
+	}
+	if (!_owner->privateAccounts().startupAllowed(identities)) {
+		_owner->privateAccounts().blockCorruptedStartup();
+		return StartModernResult::CorruptPrivateAccounts;
+	}
+	for (auto &entry : prepared) {
+		entry.account->start(std::move(entry.config));
+		_owner->accountAddedInStorage({ entry.index, std::move(entry.account) });
 	}
 
-	if (!info.stream.atEnd()) {
-		info.stream >> active;
-	}
+	if (selected) active = *selected;
 	_owner->activateFromStorage(active);
 
 	Ensures(!sessions.empty());
 	return StartModernResult::Success;
 }
 
-void Domain::writeAccounts() {
+void Domain::writeAccounts(bool sync) {
 	Expects(!_owner->accounts().empty());
 
 	const auto path = BaseGlobalPath();
@@ -220,7 +270,7 @@ void Domain::writeAccounts() {
 		QDir().mkpath(path);
 	}
 
-	FileWriteDescriptor key(ComputeKeyName(_dataName), path);
+	FileWriteDescriptor key(ComputeKeyName(_dataName), path, sync);
 	key.writeData(_passcodeKeySalt);
 	key.writeData(_passcodeKeyEncrypted);
 
@@ -234,7 +284,31 @@ void Domain::writeAccounts() {
 		keyData.stream << qint32(index);
 	}
 	keyData.stream << qint32(_owner->activeForStorage());
+	keyData.stream << _owner->privateAccounts().serialize();
 	key.writeEncrypted(keyData, _localKey);
+}
+
+bool Domain::writePrivateAccountsSync(const QByteArray &expected) {
+	writeAccounts(true);
+	auto file = FileReadDescriptor();
+	if (!ReadFile(file, ComputeKeyName(_dataName), BaseGlobalPath())) return false;
+	auto salt = QByteArray();
+	auto key = QByteArray();
+	auto encrypted = QByteArray();
+	file.stream >> salt >> key >> encrypted;
+	auto info = EncryptedDescriptor();
+	if (file.stream.status() != QDataStream::Ok || !DecryptLocal(info, encrypted, _localKey)) return false;
+	auto count = qint32();
+	info.stream >> count;
+	if (count <= 0 || count > Main::Domain::kPremiumMaxAccounts) return false;
+	for (auto i = 0; i != count; ++i) {
+		auto index = qint32();
+		info.stream >> index;
+	}
+	auto active = qint32();
+	auto actual = QByteArray();
+	info.stream >> active >> actual;
+	return info.stream.status() == QDataStream::Ok && info.stream.atEnd() && actual == expected;
 }
 
 void Domain::startFromScratch() {

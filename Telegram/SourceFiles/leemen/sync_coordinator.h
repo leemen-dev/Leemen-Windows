@@ -36,6 +36,8 @@ struct SyncPair {
 struct SyncCheckpoint {
 	std::optional<SyncPair> pending;
 	std::optional<PinRegister> authorizedPin;
+	std::int64_t filterVersionFloor = 0;
+	std::int64_t contentVersionFloor = 0;
 };
 
 struct SyncRequest {
@@ -93,6 +95,8 @@ private:
 	std::map<std::uint64_t, SyncRequest> _requests;
 	std::vector<BlobKind> _writeOrder;
 	std::uint64_t _nextRequest = 0;
+	std::int64_t _filterVersionFloor = 0;
+	std::int64_t _contentVersionFloor = 0;
 	int _conflicts = 0;
 };
 

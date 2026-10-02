@@ -13,6 +13,8 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "core/crash_reports.h"
 #include "main/main_account.h"
 #include "main/main_session.h"
+#include "leemen/leemen_private_accounts.h"
+#include "leemen/leemen_private_accounts_box.h"
 #include "data/data_session.h"
 #include "data/data_changes.h"
 #include "data/data_user.h"
@@ -30,7 +32,8 @@ namespace Main {
 
 Domain::Domain(const QString &dataName)
 : _dataName(dataName)
-, _local(std::make_unique<Storage::Domain>(this, dataName)) {
+, _local(std::make_unique<Storage::Domain>(this, dataName))
+, _privateAccounts(std::make_unique<Leemen::PrivateAccounts>(this)) {
 	_active.changes(
 	) | rpl::take(1) | rpl::on_next([=] {
 		// In case we had a legacy passcoded app we start settings here.
@@ -59,6 +62,10 @@ Domain::Domain(const QString &dataName)
 
 Domain::~Domain() = default;
 
+Leemen::PrivateAccounts &Domain::privateAccounts() const {
+	return *_privateAccounts;
+}
+
 bool Domain::started() const {
 	return !_accounts.empty();
 }
@@ -66,6 +73,7 @@ bool Domain::started() const {
 Storage::StartResult Domain::start(const QByteArray &passcode) {
 	Expects(!started());
 
+	_privateAccounts->start();
 	const auto result = _local->start(passcode);
 	if (result == Storage::StartResult::Success) {
 		activateAfterStarting();
@@ -77,6 +85,7 @@ Storage::StartResult Domain::start(const QByteArray &passcode) {
 }
 
 void Domain::finish() {
+	_privateAccounts->finish();
 	_accountToActivate = -1;
 	_active.reset(nullptr);
 	base::take(_accounts);
@@ -104,6 +113,7 @@ void Domain::accountAddedInStorage(AccountWithIndex accountWithIndex) {
 		}
 	}
 	_accounts.push_back(std::move(accountWithIndex));
+	_privateAccounts->watchAccount(_accounts.back().account.get());
 }
 
 void Domain::activateFromStorage(int index) {
@@ -115,6 +125,7 @@ int Domain::activeForStorage() const {
 }
 
 void Domain::resetWithForgottenPasscode() {
+	if (_privateAccounts->damaged()) return;
 	if (_accounts.empty()) {
 		_local->startFromScratch();
 		activateAfterStarting();
@@ -136,7 +147,11 @@ void Domain::activateAfterStarting() {
 		watchSession(account.get());
 	}
 
-	activate(toActivate);
+	if (const auto safe = _privateAccounts->safeAccount(toActivate)) {
+		activate(safe);
+	} else {
+		Unexpected("No safe account after validated private account startup.");
+	}
 	removePasscodeIfEmpty();
 }
 
@@ -169,10 +184,18 @@ rpl::producer<> Domain::accountsChanges() const {
 	return _accountsChanges.events();
 }
 
+std::vector<not_null<Account*>> Domain::nonHiddenAccounts() const {
+	auto result = orderedAccounts();
+	std::erase_if(result, [&](not_null<Account*> account) {
+		return _privateAccounts->hidden(account);
+	});
+	return result;
+}
+
 Account *Domain::maybeLastOrSomeAuthedAccount() {
 	auto result = (Account*)nullptr;
 	for (const auto &[index, account] : _accounts) {
-		if (!account->sessionExists()) {
+		if (!account->sessionExists() || _privateAccounts->hidden(account.get())) {
 			continue;
 		} else if (index == _lastActiveIndex) {
 			return account.get();
@@ -202,6 +225,10 @@ Account &Domain::active() const {
 
 	Ensures(_active.current() != nullptr);
 	return *_active.current();
+}
+
+Account *Domain::maybeActive() const {
+	return _active.current();
 }
 
 rpl::producer<not_null<Account*>> Domain::activeChanges() const {
@@ -246,6 +273,9 @@ void Domain::updateUnreadBadge() {
 	_unreadBadgeMuted = true;
 	for (const auto &[index, account] : _accounts) {
 		if (const auto session = account->maybeSession()) {
+			if (!Leemen::PrivateAccountNotificationsAllowed(session)) {
+				continue;
+			}
 			const auto data = &session->data();
 			_unreadBadge += data->unreadBadge();
 			if (!data->unreadBadgeMuted()) {
@@ -301,6 +331,7 @@ not_null<Main::Account*> Domain::add(MTP::Environment environment) {
 		.account = std::make_unique<Account>(this, _dataName, index)
 	});
 	const auto account = _accounts.back().account.get();
+	_privateAccounts->watchAccount(account);
 	account->setMtpMainDcId(mainDcId);
 	_local->startAdded(account, std::move(config));
 	watchSession(account);
@@ -374,7 +405,7 @@ void Domain::closeAccountWindows(not_null<Main::Account*> account) {
 	auto another = (Main::Account*)nullptr;
 	for (auto i = _accounts.begin(); i != _accounts.end(); ++i) {
 		const auto other = not_null(i->account.get());
-		if (other == account) {
+		if (other == account || _privateAccounts->hidden(other)) {
 			continue;
 		} else if (Core::App().separateWindowFor(other)) {
 			const auto that = Core::App().separateWindowFor(account);
@@ -469,6 +500,10 @@ void Domain::maybeActivate(not_null<Main::Account*> account) {
 }
 
 void Domain::activate(not_null<Main::Account*> account) {
+	if (!_privateAccounts->canActivate(account)) {
+		Leemen::ShowPrivateAccountSwitch(account);
+		return;
+	}
 	if (const auto window = Core::App().separateWindowFor(account)) {
 		window->activate();
 	}

@@ -6,6 +6,7 @@ For license and copyright information please follow this link:
 https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "history/history_inner_widget.h"
+#include "leemen/leemen_private_messages_box.h"
 
 #include "api/api_polls.h"
 #include "chat_helpers/stickers_emoji_pack.h"
@@ -2976,6 +2977,7 @@ void HistoryInner::showContextMenu(QContextMenuEvent *e, bool showFromTouch) {
 		}
 		const auto itemId = item->fullId();
 		const auto repliesCount = item->repliesCount();
+		Leemen::AddPrivateMessageActions(_menu, controller, itemId);
 		const auto withReplies = (repliesCount > 0);
 		const auto topicRootId = item->history()->isForum()
 			? item->topicRootId()

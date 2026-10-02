@@ -7,5 +7,6 @@ class SessionController;
 namespace Leemen {
 
 void ShowPrivateSpace(not_null<Window::SessionController*> controller);
+void ShowPrivateSpaceLimit(not_null<Window::SessionController*> controller);
 
 } // namespace Leemen

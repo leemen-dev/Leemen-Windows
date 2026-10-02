@@ -4749,7 +4749,8 @@ void InnerWidget::searchReceived(
 			}
 		}
 	}
-	if (session().leemen().configured() && !session().leemen().active()) {
+	if (!session().leemen().allowsPeer(session().userPeerId())
+		|| (session().leemen().configured() && !session().leemen().active())) {
 		fullCount = int(results.size());
 	}
 	if (type.migrated) {
@@ -4777,7 +4778,7 @@ void InnerWidget::peerSearchReceived(Api::PeerSearchResult result) {
 	}
 	const auto inlist = [&](not_null<PeerData*> peer) {
 		if (!session().leemen().allowsPeer(peer->id)) {
-			return true;
+			return !session().leemen().messageStateReady();
 		}
 		if (const auto history = peer->owner().historyLoaded(peer)) {
 			// Skip existing chats.
@@ -4786,6 +4787,13 @@ void InnerWidget::peerSearchReceived(Api::PeerSearchResult result) {
 		return false;
 	};
 	auto added = base::flat_set<not_null<PeerData*>>();
+	if (session().leemen().messageStateReady() && !_peerSearchQuery.isEmpty()) {
+		for (const auto peer : result.my) {
+			if (!session().leemen().allowsPeer(peer->id) && added.emplace(peer).second) {
+				_peerSearchResults.push_back(std::make_unique<PeerSearchResult>(peer));
+			}
+		}
+	}
 	for (const auto &sponsored : result.sponsored) {
 		const auto peer = sponsored.peer;
 		if (inlist(peer) || _sponsoredRemoved.contains(peer)) {

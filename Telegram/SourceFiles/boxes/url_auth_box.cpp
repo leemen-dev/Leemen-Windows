@@ -70,7 +70,7 @@ struct SwitchAccountResult {
 		return std::shared_ptr<Ui::DynamicImage>();
 	};
 	if (session->isTestMode()) {
-		for (const auto &account : Core::App().domain().orderedAccounts()) {
+		for (const auto &account : Core::App().domain().nonHiddenAccounts()) {
 			if (!account->sessionExists()
 				|| account->session().isTestMode()) {
 				continue;
@@ -100,7 +100,7 @@ struct SwitchAccountResult {
 		if (!userIdHint) {
 			return session->user().get();
 		}
-		for (const auto &account : Core::App().domain().orderedAccounts()) {
+		for (const auto &account : Core::App().domain().nonHiddenAccounts()) {
 			if (!account->sessionExists()
 				|| (account->session().isTestMode() != isCurrentTest)) {
 				continue;
@@ -120,7 +120,7 @@ struct SwitchAccountResult {
 	widget->setUserpic(userpic);
 	const auto filtered = [=] {
 		auto result = std::vector<not_null<Main::Session*>>();
-		for (const auto &account : Core::App().domain().orderedAccounts()) {
+		for (const auto &account : Core::App().domain().nonHiddenAccounts()) {
 			if (!account->sessionExists()
 				|| (account->session().user() == state->currentUser)
 				|| (account->session().isTestMode() != isCurrentTest)) {
@@ -179,7 +179,7 @@ struct SwitchAccountResult {
 		[=](Fn<void()> callback) { state->onUserChanged = callback; },
 		[=](UserId newUserIdHint) {
 			const auto isCurrentTest = session->isTestMode();
-			for (const auto &acc : Core::App().domain().orderedAccounts()) {
+			for (const auto &acc : Core::App().domain().nonHiddenAccounts()) {
 				if (!acc->sessionExists()
 					|| (acc->session().isTestMode() != isCurrentTest)) {
 					continue;

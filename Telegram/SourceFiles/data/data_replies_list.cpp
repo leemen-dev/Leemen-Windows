@@ -11,6 +11,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "history/history_item.h"
 #include "history/history_item_helpers.h"
 #include "main/main_session.h"
+#include "leemen/leemen_private_space.h"
 #include "data/data_histories.h"
 #include "data/data_session.h"
 #include "data/data_changes.h"
@@ -969,7 +970,8 @@ void RepliesList::readTill(MsgId tillId) {
 void RepliesList::readTill(
 		MsgId tillId,
 		HistoryItem *tillIdItem) {
-	if (!IsServerMsgId(tillId)) {
+	if (!_history->session().leemen().allowsPeer(_history->peer->id)
+		|| !IsServerMsgId(tillId)) {
 		return;
 	}
 	const auto was = computeInboxReadTillFull();
@@ -999,6 +1001,10 @@ void RepliesList::readTill(
 }
 
 void RepliesList::sendReadTillRequest() {
+	if (!_history->session().leemen().allowsPeer(_history->peer->id)) {
+		_readRequestTimer.cancel();
+		return;
+	}
 	if (_readRequestTimer.isActive()) {
 		_readRequestTimer.cancel();
 	}

@@ -1284,6 +1284,9 @@ void Account::unregisterDraftSource(
 }
 
 void Account::writeDrafts(not_null<History*> history) {
+	if (history->privateDraftsActive()) {
+		return;
+	}
 	const auto peerId = history->peer->id;
 	const auto &map = history->draftsMap();
 	const auto supportMode = history->session().supportMode();
@@ -1383,6 +1386,9 @@ void Account::writeDrafts(not_null<History*> history) {
 }
 
 void Account::writeDraftCursors(not_null<History*> history) {
+	if (history->privateDraftsActive()) {
+		return;
+	}
 	const auto peerId = history->peer->id;
 	const auto &map = history->draftsMap();
 	const auto supportMode = history->session().supportMode();
@@ -2932,6 +2938,10 @@ void Account::saveRecentSentHashtags(const QString &text) {
 }
 
 void Account::saveRecentSearchHashtags(const QString &text) {
+	// Searches made in private space must not seed public hashtag suggestions.
+	if (_owner->session().leemen().active()) {
+		return;
+	}
 	const auto result = saveRecentHashtags(
 		[] { return cRecentSearchHashtags(); },
 		text);

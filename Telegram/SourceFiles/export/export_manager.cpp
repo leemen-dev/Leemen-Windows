@@ -14,6 +14,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "main/main_account.h"
 #include "lang/lang_keys.h"
 #include "leemen/leemen_private_space.h"
+#include "leemen/leemen_private_accounts.h"
 #include "ui/layers/box_content.h"
 #include "window/window_session_controller.h"
 #include "base/unixtime.h"
@@ -22,6 +23,9 @@ namespace Export {
 namespace {
 
 [[nodiscard]] bool AllowExport(not_null<Main::Session*> session) {
+	if (!Leemen::PrivateAccountContentAllowed(session)) {
+		return false;
+	}
 	if (!session->leemen().configured() || session->leemen().active()) {
 		return true;
 	}
@@ -83,7 +87,8 @@ void Manager::setupPanel(not_null<Main::Session*> session) {
 		_controller.get());
 	session->leemen().changes(
 	) | rpl::filter([=] {
-		return session->leemen().configured() && !session->leemen().active();
+		return !Leemen::PrivateAccountContentAllowed(session)
+			|| (session->leemen().configured() && !session->leemen().active());
 	}) | rpl::on_next([=] {
 		stop();
 	}, _panel->lifetime());

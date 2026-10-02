@@ -6,6 +6,7 @@ For license and copyright information please follow this link:
 https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "history/view/history_view_context_menu.h"
+#include "leemen/leemen_private_messages_box.h"
 
 #include "api/api_attached_stickers.h"
 #include "api/api_editing.h"
@@ -1391,6 +1392,9 @@ void AddTopMessageActions(
 		return;
 	}
 	AddGoToMessageAction(menu, request, list);
+	if (request.item && request.selectedItems.empty()) {
+		Leemen::AddPrivateMessageActions(menu, list->controller(), request.item->fullId());
+	}
 	AddViewRepliesAction(menu, request, list);
 	AddEditMessageAction(menu, request, list);
 	AddFactcheckAction(menu, request, list);

@@ -236,11 +236,14 @@ void Polls::create(
 	if (action.replyTo) {
 		sendFlags |= MTPmessages_SendMedia::Flag::f_reply_to;
 	}
-	const auto clearCloudDraft = action.clearDraft;
-	if (clearCloudDraft) {
-		sendFlags |= MTPmessages_SendMedia::Flag::f_clear_draft;
+	const auto clearCloudDraft = action.clearDraft
+		&& !history->privateDraftsActive();
+	if (action.clearDraft) {
 		history->clearLocalDraft(topicRootId, monoforumPeerId);
 		history->clearCloudDraft(topicRootId, monoforumPeerId);
+	}
+	if (clearCloudDraft) {
+		sendFlags |= MTPmessages_SendMedia::Flag::f_clear_draft;
 		history->startSavingCloudDraft(topicRootId, monoforumPeerId);
 	}
 	const auto silentPost = ShouldSendSilent(peer, action.options);

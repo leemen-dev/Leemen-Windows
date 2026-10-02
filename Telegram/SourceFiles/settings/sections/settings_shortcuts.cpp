@@ -61,6 +61,7 @@ struct Labeled {
 	return {
 		{ C::Close, tr::lng_shortcuts_close() },
 		{ C::Lock, tr::lng_shortcuts_lock() },
+		{ C::LeemenPrivateSpace, tr::lng_leemen_private_space() },
 		{ C::Minimize, tr::lng_shortcuts_minimize() },
 		{ C::Quit, tr::lng_shortcuts_quit() },
 		{ C::ReopenClosedWindow, tr::lng_shortcuts_reopen_closed_window() },

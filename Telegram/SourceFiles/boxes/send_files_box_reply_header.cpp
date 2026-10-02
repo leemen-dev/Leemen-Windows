@@ -16,6 +16,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "history/history_item.h"
 #include "history/view/history_view_reply.h"
 #include "lang/lang_keys.h"
+#include "leemen/leemen_private_space.h"
 #include "main/main_session.h"
 #include "ui/chat/chat_style.h"
 #include "ui/effects/spoiler_mess.h"
@@ -71,6 +72,12 @@ ReplyPillHeader::ReplyPillHeader(
 		} else {
 			updateShownMessageText();
 			RpWidget::update();
+		}
+	}, lifetime());
+
+	_data->session().leemen().changes() | rpl::on_next([=] {
+		if (_shownMessage && _shownMessage->isHiddenSavedMessage()) {
+			setShownMessage(_shownMessage);
 		}
 	}, lifetime());
 
@@ -144,6 +151,13 @@ void ReplyPillHeader::resolveMessageData() {
 }
 
 void ReplyPillHeader::setShownMessage(HistoryItem *item) {
+	if (item && item->isHiddenSavedMessage()) {
+		_shownMessage = nullptr;
+		_shownMessageName.clear();
+		_shownMessageText.clear();
+		hideAnimated();
+		return;
+	}
 	_shownMessage = item;
 	if (item) {
 		updateShownMessageText();
@@ -169,6 +183,11 @@ void ReplyPillHeader::setShownMessage(HistoryItem *item) {
 
 void ReplyPillHeader::updateShownMessageText() {
 	Expects(_shownMessage != nullptr);
+	if (_shownMessage->isHiddenSavedMessage()) {
+		_shownMessageName.clear();
+		_shownMessageText.clear();
+		return;
+	}
 
 	const auto context = Core::TextContext({
 		.session = &_data->session(),
@@ -199,6 +218,9 @@ void ReplyPillHeader::resizeEvent(QResizeEvent *e) {
 
 void ReplyPillHeader::paintEvent(QPaintEvent *e) {
 	_repaintScheduled = false;
+	if (_shownMessage && _shownMessage->isHiddenSavedMessage()) {
+		return;
+	}
 
 	Painter p(this);
 	p.setInactive(_show->paused(Window::GifPauseReason::Layer));

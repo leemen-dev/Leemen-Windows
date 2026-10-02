@@ -6,6 +6,8 @@ For license and copyright information please follow this link:
 https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "core/application.h"
+#include "leemen/leemen_private_accounts.h"
+#include "leemen/leemen_entry_shortcut.h"
 
 #include "data/data_abstract_structure.h"
 #include "data/data_channel.h"
@@ -1482,6 +1484,13 @@ Window::Controller *Application::separateWindowFor(
 not_null<Window::Controller*> Application::ensureSeparateWindowFor(
 		Window::SeparateId id,
 		MsgId showAtMsgId) {
+	if (id.account && id.account->domain().privateAccounts().hidden(id.account)) {
+		if (const auto window = activePrimaryWindow()) return window;
+		if (const auto safe = id.account->domain().privateAccounts().safeAccount()) {
+			return ensureSeparateWindowFor(safe);
+		}
+		Unexpected("No safe primary window for a hidden account.");
+	}
 	const auto activate = [&](not_null<Window::Controller*> window) {
 		window->activate();
 		return window;
@@ -2007,6 +2016,9 @@ void Application::startShortcuts() {
 	Shortcuts::Requests(
 	) | rpl::on_next([=](not_null<Shortcuts::Request*> request) {
 		using Command = Shortcuts::Command;
+		request->check(Command::LeemenPrivateSpace) && request->handle([] {
+			return Leemen::HandlePrivateSpaceShortcut();
+		});
 		request->check(Command::Quit) && request->handle([] {
 			Quit();
 			return true;
@@ -2043,7 +2055,7 @@ void Application::RegisterUrlScheme() {
 		.arguments = arguments,
 		.protocol = u"tg"_q,
 		.protocolName = u"Telegram Link"_q,
-		.shortAppName = u"tdesktop"_q,
+		.shortAppName = u"leemen"_q,
 		.longAppName = QCoreApplication::applicationName(),
 		.displayAppName = AppName.utf16(),
 		.displayAppDescription = AppName.utf16(),
@@ -2054,7 +2066,7 @@ void Application::RegisterUrlScheme() {
 		.arguments = arguments,
 		.protocol = u"tonsite"_q,
 		.protocolName = u"TonSite Link"_q,
-		.shortAppName = u"tdesktop"_q,
+		.shortAppName = u"leemen"_q,
 		.longAppName = QCoreApplication::applicationName(),
 		.displayAppName = AppName.utf16(),
 		.displayAppDescription = AppName.utf16(),

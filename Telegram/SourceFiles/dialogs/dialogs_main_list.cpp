@@ -13,6 +13,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "data/data_chat_filters.h"
 #include "main/main_session.h"
 #include "leemen/leemen_private_space.h"
+#include "leemen/leemen_private_accounts.h"
 #include "history/history_unread_things.h"
 #include "history/history.h"
 
@@ -117,6 +118,10 @@ void MainList::removeEntry(Key key) {
 }
 
 void MainList::recomputeFullListSize() {
+	if (!Leemen::PrivateAccountContentAllowed(_session)) {
+		_fullListSize = 0;
+		return;
+	}
 	_fullListSize = std::max(
 		_all.size(),
 		(loaded() || _session->leemen().configured()) ? 0 : _cloudListSize);
@@ -229,6 +234,9 @@ UnreadState MainList::unreadState() const {
 }
 
 UnreadState MainList::visibleUnreadState() const {
+	if (!Leemen::PrivateAccountContentAllowed(_session)) {
+		return UnreadState{ .known = true };
+	}
 	if (!_session->leemen().configured()) {
 		return unreadState();
 	}

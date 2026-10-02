@@ -6,6 +6,7 @@ For license and copyright information please follow this link:
 https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "dialogs/dialogs_widget.h"
+#include "leemen/leemen_private_messages_box.h"
 
 #include "base/call_delayed.h"
 #include "base/qt/qt_key_modifiers.h"
@@ -999,6 +1000,11 @@ void Widget::chosenRow(const ChosenRow &row) {
 	}
 
 	const auto history = row.key.history();
+	if (history && !_searchState.query.isEmpty()
+		&& !session().leemen().allowsPeer(history->peer->id)) {
+		Leemen::ShowPublicMessages(controller(), history->peer->id);
+		return;
+	}
 	const auto topicJump = history
 		? history->peer->forumTopicFor(row.topicJumpRootId)
 		: nullptr;

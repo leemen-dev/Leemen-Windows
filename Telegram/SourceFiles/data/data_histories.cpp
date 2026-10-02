@@ -26,6 +26,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "base/unixtime.h"
 #include "base/random.h"
 #include "main/main_session.h"
+#include "leemen/leemen_private_space.h"
 #include "window/notifications_manager.h"
 #include "history/history.h"
 #include "history/history_item.h"
@@ -173,6 +174,9 @@ void Histories::clearAll() {
 }
 
 void Histories::readInbox(not_null<History*> history) {
+	if (!session().leemen().allowsPeer(history->peer->id)) {
+		return;
+	}
 	DEBUG_LOG(("Reading: readInbox called."));
 	if (history->lastServerMessageKnown()) {
 		const auto last = history->lastServerMessage();
@@ -204,6 +208,9 @@ void Histories::readInbox(not_null<History*> history) {
 }
 
 void Histories::readInboxTill(not_null<HistoryItem*> item) {
+	if (!session().leemen().allowsPeer(item->history()->peer->id)) {
+		return;
+	}
 	const auto history = item->history();
 	if (!item->isRegular()) {
 		readClientSideMessage(item);
@@ -249,6 +256,9 @@ void Histories::readInboxTill(
 		not_null<History*> history,
 		MsgId tillId,
 		bool force) {
+	if (!session().leemen().allowsPeer(history->peer->id)) {
+		return;
+	}
 	Expects(IsServerMsgId(tillId) || (!tillId && !force));
 
 	DEBUG_LOG(("Reading: readInboxTill %1, force %2."
@@ -340,6 +350,9 @@ void Histories::readInboxTill(
 }
 
 void Histories::readInboxOnNewMessage(not_null<HistoryItem*> item) {
+	if (!session().leemen().allowsPeer(item->history()->peer->id)) {
+		return;
+	}
 	if (!item->isRegular()) {
 		readClientSideMessage(item);
 	} else {
@@ -348,6 +361,9 @@ void Histories::readInboxOnNewMessage(not_null<HistoryItem*> item) {
 }
 
 void Histories::readClientSideMessage(not_null<HistoryItem*> item) {
+	if (!session().leemen().allowsPeer(item->history()->peer->id)) {
+		return;
+	}
 	if (item->out() || !item->unread(item->history())) {
 		return;
 	}
@@ -516,6 +532,9 @@ void Histories::applyPeerDialogs(const MTPmessages_PeerDialogs &dialogs) {
 void Histories::changeDialogUnreadMark(
 		not_null<History*> history,
 		bool unread) {
+	if (!unread && !session().leemen().allowsPeer(history->peer->id)) {
+		return;
+	}
 	history->setUnreadMark(unread);
 
 	using Flag = MTPmessages_MarkDialogUnread::Flag;
@@ -530,7 +549,7 @@ void Histories::changeSublistUnreadMark(
 		not_null<Data::SavedSublist*> sublist,
 		bool unread) {
 	const auto parent = sublist->parentChat();
-	if (!parent) {
+	if (!parent || (!unread && !session().leemen().allowsPeer(parent->id))) {
 		return;
 	}
 	sublist->setUnreadMark(unread);
@@ -693,6 +712,11 @@ void Histories::sendReadRequests() {
 	const auto now = crl::now();
 	auto next = std::optional<crl::time>();
 	for (auto &[history, state] : _states) {
+		if (!session().leemen().allowsPeer(history->peer->id)) {
+			state.willReadTill = 0;
+			state.willReadWhen = 0;
+			continue;
+		}
 		if (!state.willReadTill) {
 			DEBUG_LOG(("Reading: skipping zero till."));
 			continue;

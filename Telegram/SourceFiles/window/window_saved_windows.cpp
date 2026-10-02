@@ -9,6 +9,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 
 #include "apiwrap.h"
 #include "base/call_delayed.h"
+#include "base/weak_ptr.h"
 #include "core/application.h"
 #include "data/data_channel.h"
 #include "data/data_community.h"
@@ -28,6 +29,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "history/view/history_view_scheduled_section.h"
 #include "info/media/info_media_widget.h"
 #include "lang/lang_keys.h"
+#include "leemen/leemen_private_accounts.h"
 #include "main/main_account.h"
 #include "main/main_domain.h"
 #include "main/main_session.h"
@@ -388,6 +390,15 @@ SavedWindows::SavedWindows(not_null<Core::Application*> app)
 		_toRestore = Deserialize(
 			app->settings().readPref<QByteArray>(kPrefKey));
 	}
+	app->domain().privateAccounts().changes() | rpl::on_next([=] {
+		while (true) {
+			const auto i = ranges::find_if(_steps, [=](const auto &step) {
+				return step->session->domain().privateAccounts().hidden(&step->session->account());
+			});
+			if (i == end(_steps)) break;
+			abortStep(i->get(), false);
+		}
+	}, _lifetime);
 }
 
 SavedWindows::~SavedWindows() = default;
@@ -531,6 +542,7 @@ std::optional<SavedWindow> SavedWindows::serializeWindow(
 		return {};
 	}
 	const auto session = &controller->session();
+	if (session->domain().privateAccounts().hidden(&session->account())) return {};
 	auto result = SavedWindow();
 	for (const auto &entry : _app->domain().accounts()) {
 		if (entry.account.get() == id.account) {
@@ -864,7 +876,7 @@ Main::Session *SavedWindows::sessionFor(const SavedWindow &data) const {
 		}
 	}
 	const auto session = account ? account->maybeSession() : nullptr;
-	if (!session
+	if (!session || session->domain().privateAccounts().hidden(&session->account())
 		|| (data.userPeer != 0
 			&& session->userPeerId().value != data.userPeer)) {
 		return nullptr;
@@ -1072,7 +1084,7 @@ void SavedWindows::pushClosed(SavedWindow &&data, RestoreShell *shell) {
 }
 
 void SavedWindows::markUnavailable(std::unique_ptr<Step> step) {
-	if (Core::Quitting()) {
+	if (Core::Quitting() || step->session->domain().privateAccounts().hidden(&step->session->account())) {
 		return;
 	}
 	auto shell = step->shell
@@ -1083,6 +1095,15 @@ void SavedWindows::markUnavailable(std::unique_ptr<Step> step) {
 	pushClosed(std::move(step->data), shell.get());
 	const auto raw = shell.get();
 	raw->showUnavailable();
+	const auto weakSession = base::make_weak(step->session);
+	_app->domain().privateAccounts().changes() | rpl::on_next([=] {
+		if (weakSession && !weakSession->domain().privateAccounts().hidden(&weakSession->account())) return;
+		raw->hide();
+		crl::on_main(this, [=] {
+			const auto i = ranges::find(_deadShells, raw, &std::unique_ptr<RestoreShell>::get);
+			if (i != end(_deadShells)) _deadShells.erase(i);
+		});
+	}, raw->lifetime());
 	raw->closeRequests(
 	) | rpl::on_next([=] {
 		crl::on_main(this, [=] {
@@ -1410,6 +1431,7 @@ void SavedWindows::sendNextBatchRequest(not_null<Main::Session*> session) {
 void SavedWindows::createWindow(const Step &step) {
 	const auto &data = step.data;
 	const auto session = step.session;
+	if (session->domain().privateAccounts().hidden(&session->account())) return;
 	const auto windowThread = step.slots[0];
 	const auto id = StepSeparateId(data, session, windowThread);
 	if (!id) {
@@ -1487,6 +1509,7 @@ void SavedWindows::ensureStepWindow(
 		not_null<Step*> step,
 		SeparateId id,
 		Core::WindowPosition position) {
+	if (id.account && id.account->domain().privateAccounts().hidden(id.account)) return;
 	const auto existed = (_app->separateWindowFor(id) != nullptr);
 	const auto validPosition = (position.w > 0) && (position.h > 0);
 	if (!existed && validPosition) {

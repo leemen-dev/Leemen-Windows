@@ -5,7 +5,7 @@ Leemen for Windows is a fork of [Telegram Desktop][telegram_desktop], using the 
 [![Windows build](https://github.com/leemen-dev/Leemen-Windows/actions/workflows/win.yml/badge.svg)](https://github.com/leemen-dev/Leemen-Windows/actions/workflows/win.yml)
 [![Portable core tests](https://github.com/leemen-dev/Leemen-Windows/actions/workflows/leemen-core-tests.yml/badge.svg)](https://github.com/leemen-dev/Leemen-Windows/actions/workflows/leemen-core-tests.yml)
 
-The local Private Space preview is under development and enrollment is disabled by default. It is not ready for sensitive conversations and does not sync with Leemen Android. See [the preview build and test instructions](docs/building-win.md#leemen-private-space-preview). The inherited Telegram download links below do not contain Leemen features.
+The Private Space preview includes Android-compatible encrypted synchronization, PIN protection, hidden chats and accounts, explicit message visibility, maximum privacy with recovery words, and Leemen subscription limits. Enrollment is disabled by default in manual builds. See [the Debug build and test instructions](docs/building-win.md#leemen-private-space-preview) for the current verification status and limitations. The inherited Telegram download links below do not contain Leemen features.
 
 [![Preview of Telegram Desktop][preview_image]][preview_image_url]
 

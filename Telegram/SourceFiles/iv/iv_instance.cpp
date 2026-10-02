@@ -31,6 +31,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "iv/iv_rich_page.h"
 #include "lang/lang_keys.h"
 #include "leemen/leemen_private_space.h"
+#include "leemen/leemen_private_accounts.h"
 #include "main/main_session.h"
 #include "main/session/session_show.h"
 #include "media/view/media_view_open_common.h"
@@ -157,7 +158,9 @@ struct LocalMarkdownTarget {
 [[nodiscard]] bool CanShowMessageMarkdown(
 		not_null<Main::Session*> session,
 		FullMsgId itemId) {
-	if (!itemId) {
+	if (!Leemen::PrivateAccountContentAllowed(session)) {
+		return false;
+	} else if (!itemId) {
 		return !session->leemen().configured() || session->leemen().active();
 	} else if (!session->leemen().allowsPeer(itemId.peer)) {
 		return false;
