@@ -32,6 +32,7 @@ get_filename_component(src_loc SourceFiles REALPATH)
 get_filename_component(res_loc Resources REALPATH)
 
 include(cmake/telegram_options.cmake)
+include(cmake/leemen_sodium.cmake)
 include(cmake/lib_ffmpeg.cmake)
 include(cmake/lib_stripe.cmake)
 include(cmake/lib_tgcalls.cmake)
@@ -71,6 +72,7 @@ set_target_properties(Telegram PROPERTIES AUTOMOC ON)
 
 target_link_libraries(Telegram
 PRIVATE
+    leemen::sodium
     tdesktop::lib_fido2
     tdesktop::lib_tgcalls
     tdesktop::td_export
@@ -1473,6 +1475,13 @@ PRIVATE
     leemen/local_pin.h
     leemen/private_space_state.cpp
     leemen/private_space_state.h
+    leemen/private_drafts.h
+    leemen/sync_blob.cpp
+    leemen/sync_blob.h
+    leemen/sync_coordinator.cpp
+    leemen/sync_coordinator.h
+    leemen/sync_crypto.cpp
+    leemen/sync_crypto.h
     leemen/sync_identifiers.cpp
     leemen/sync_identifiers.h
     main/main_session.cpp
