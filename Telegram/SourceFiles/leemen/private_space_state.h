@@ -16,10 +16,10 @@ enum class MessageState {
 };
 
 struct PrivateSpaceSnapshot {
-	std::set<std::uint64_t> hiddenPeers;
-	std::map<std::uint64_t, std::map<std::int64_t, MessageState>> messages;
-	std::map<std::uint64_t, std::set<std::int64_t>> selfPinned;
-	std::set<std::uint64_t> privateSearchPeers;
+	std::set<std::uint64_t> hiddenPeers = {};
+	std::map<std::uint64_t, std::map<std::int64_t, MessageState>> messages = {};
+	std::map<std::uint64_t, std::set<std::int64_t>> selfPinned = {};
+	std::set<std::uint64_t> privateSearchPeers = {};
 };
 
 class PrivateSpaceState final {
