@@ -2341,6 +2341,7 @@ if (WIN32)
         target_link_libraries(Telegram PRIVATE desktop-app::win_directx_helper)
     endif()
 
+    target_link_libraries(Telegram PRIVATE dnsapi)
     target_link_options(Telegram PRIVATE /PDBPAGESIZE:8192)
 elseif (APPLE)
     if (NOT DESKTOP_APP_USE_PACKAGED)
