@@ -1,4 +1,5 @@
 #include "leemen/sync_session_snapshot.h"
+#include "leemen/private_message_policy.h"
 
 #include <cstdlib>
 #include <iostream>
@@ -292,6 +293,7 @@ void CachedBaseline() {
 	pair.contentVersion = 7;
 	pair.filter.hiddenChatIds["42"] = { "present", 3, "android", {} };
 	pair.content.perChat["42"].messageState["5"] = { "hidden", 3, "android", {} };
+	pair.content.privateSearchDialogIds["43"] = { "present", 3, "android", {} };
 	snapshot.checkpoint.confirmed = pair;
 	snapshot.checkpoint.filterVersionFloor = 4;
 	snapshot.checkpoint.contentVersionFloor = 7;
@@ -304,6 +306,9 @@ void CachedBaseline() {
 	auto coordinator = SyncCoordinator();
 	Check(coordinator.restoreCheckpoint(restored->checkpoint), "cached checkpoint restored closed");
 	Check(coordinator.cachedProjection() && !coordinator.projection(), "cache does not grant fresh mutation authority");
+	Check(Leemen::PrivateSearchOnly(&coordinator.cachedProjection()->content, 43)
+		&& !coordinator.cachedProjection()->filter.hiddenChatIds.contains("43"),
+		"key-bound offline snapshot retains private recents for an ordinary chat");
 	Check(!ReadSessionSnapshot(bytes, snapshot.telegramUserId + 1), "cache cannot move to another Telegram user");
 	auto legacy = *ParseJson(bytes).value;
 	std::get<Object>(legacy.value)["version"] = JsonValue{ JsonNumber{ "1" } };

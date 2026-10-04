@@ -228,17 +228,19 @@ void PrivateSpace::recordSelfPin(FullMsgId id, bool pinned) {
 }
 
 bool PrivateSpace::privateSearch(PeerId peer) const {
-	const auto local = _searchChanges.find(peer);
-	if (local != _searchChanges.end()) {
-		return local->second.state != "removed";
-	}
 	const auto id = Sync::CanonicalPeerId(peer);
-	if (!id || !_syncProjection) {
+	if (!id) {
 		return false;
 	}
-	const auto &values = _syncProjection->content.privateSearchDialogIds;
-	const auto i = values.find(*Sync::CanonicalPeerKey(*id));
-	return i != values.end() && i->second.state != "removed";
+	const auto local = _searchChanges.find(peer);
+	// Cached state may only hide recent searches; it grants no message access.
+	const auto projection = (_syncTrusted && _syncProjection)
+		? &*_syncProjection
+		: (_syncCachedMembership && _sync ? _sync->cachedProjection() : nullptr);
+	return PrivateSearchOnly(
+		projection ? &projection->content : nullptr,
+		*id,
+		local != _searchChanges.end() ? &local->second : nullptr);
 }
 
 bool PrivateSpace::allowsRecentSearch(PeerId peer) const {

@@ -6,6 +6,25 @@
 
 namespace Leemen {
 
+[[nodiscard]] inline bool PrivateSearchOnly(
+		const Sync::ContentBlob *content,
+		std::int64_t peer,
+		const Sync::Register *local = nullptr) {
+	const auto key = Sync::CanonicalPeerKey(peer);
+	if (!key) {
+		return false;
+	}
+	if (local) {
+		return local->state != "removed";
+	}
+	if (!content) {
+		return false;
+	}
+	const auto value = content->privateSearchDialogIds.find(*key);
+	return value != content->privateSearchDialogIds.end()
+		&& value->second.state != "removed";
+}
+
 [[nodiscard]] inline bool VisibleOwnPinService(
 		bool outgoing,
 		bool sameChat,

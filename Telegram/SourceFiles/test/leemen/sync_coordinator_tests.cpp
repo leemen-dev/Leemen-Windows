@@ -1,4 +1,5 @@
 #include "leemen/sync_coordinator.h"
+#include "leemen/private_message_policy.h"
 
 #include <cstdlib>
 #include <iostream>
@@ -301,6 +302,52 @@ void OfflineConfirmedBaseline() {
 	Check(!sync.cachedProjection() && !sync.checkpoint().confirmed, "confirmed reset cleanup wipes baseline");
 }
 
+void OfflineRecentSearchBaseline() {
+	auto sync = EmptyReady();
+	auto filter = sync.projection()->filter;
+	auto content = sync.projection()->content;
+	const auto clock = *NextLamport(filter, content);
+	content.privateSearchDialogIds["43"] = { "present", clock, "windows", {} };
+	const auto reads = sync.submit(filter, content);
+	Check(reads.size() == 2, "private search is submitted to both-half reconciliation");
+	Check(sync.acceptRead(reads[0].id, Absent()).empty(), "private search preflight waits for content");
+	auto writes = sync.acceptRead(reads[1].id, Absent());
+	Check(!writes.empty(), "private search produces a remote write");
+	while (!writes.empty()) {
+		Check(writes.size() == 1, "private search acknowledgement stays ordered");
+		writes = sync.acceptWrite(writes[0].id, RemoteWriteStatus::Accepted,
+			writes[0].previousVersion + 1);
+	}
+	Check(sync.projection() && !sync.pendingMutation(), "private search acknowledgement clears local sync intent");
+	Check(!sync.projection()->filter.hiddenChatIds.contains("43"), "private search fixture is an ordinary chat");
+	Check(Leemen::PrivateSearchOnly(&sync.projection()->content, 43), "fresh pair contains acknowledged private search");
+	auto restarted = SyncCoordinator();
+	Check(restarted.restoreCheckpoint(sync.checkpoint()), "acknowledged private search baseline restores");
+	Check(!restarted.projection() && restarted.cachedProjection(), "restored private search grants no fresh pair");
+	Check(Leemen::PrivateSearchOnly(&restarted.cachedProjection()->content, 43),
+		"ordinary chat searched in Private Space remains absent from offline recents after restart");
+	const auto offline = restarted.pull();
+	Check(restarted.acceptRead(offline[0].id, { RemoteReadStatus::Failed, 0, {} }).empty(),
+		"failed recent-search refresh emits no PUT");
+	Check(restarted.cachedProjection() && Leemen::PrivateSearchOnly(&restarted.cachedProjection()->content, 43),
+		"failed network refresh keeps the confirmed recent-search deny record");
+	for (const auto plaintext : { "broken", "{\"schema_version\":3}" }) {
+		auto invalid = SyncCoordinator();
+		Check(invalid.restoreCheckpoint(sync.checkpoint()), "private search cache restores before invalid remote read");
+		const auto requests = invalid.pull();
+		Check(invalid.acceptRead(requests[0].id, Present(sync.projection()->filter)).empty(),
+			"recent-search refresh waits for complete content before PUT");
+		Check(invalid.acceptRead(requests[1].id, { RemoteReadStatus::Present, 1, plaintext }).empty(),
+			"corrupt or unsupported recent-search refresh emits no PUT");
+		Check(!invalid.cachedProjection() && !invalid.projection(),
+			"corrupt or unsupported remote pair closes cached recent-search source and ordinary-chat grants");
+	}
+	restarted.discardCachedProjection();
+	Check(!restarted.cachedProjection(), "hard key or generation invalidation revokes recent-search baseline");
+	sync.close();
+	Check(!sync.cachedProjection() && !sync.projection(), "logout erases recent-search projection authority");
+}
+
 } // namespace
 
 int main() {
@@ -313,5 +360,6 @@ int main() {
 	RemoteResetCannotResurrectState();
 	NonVisibilityMutations();
 	OfflineConfirmedBaseline();
+	OfflineRecentSearchBaseline();
 	std::cout << Checks << " sync coordinator checks passed\n";
 }

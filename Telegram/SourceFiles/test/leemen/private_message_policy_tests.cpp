@@ -72,6 +72,21 @@ int main() {
 	Check(!VisibleOwnPinService(true, true, static_cast<MessageState>(99)),
 		"unknown target state acquired pin visibility");
 	auto content = Sync::ContentBlob();
+	Check(!PrivateSearchOnly(nullptr, 42), "fresh install invented private recent-search state");
+	content.privateSearchDialogIds["42"] = { "present", 4, "android", {} };
+	Check(PrivateSearchOnly(&content, 42), "confirmed private recent search became public");
+	Check(!PrivateSearchOnly(&content, 43), "another peer inherited the recent-search restriction");
+	Check(!PrivateSearchOnly(&content, 0), "invalid peer acquired a recent-search record");
+	const auto publicSearch = Sync::Register{ "removed", 5, "windows", {} };
+	const auto privateSearch = Sync::Register{ "present", 5, "windows", {} };
+	Check(!PrivateSearchOnly(&content, 42, &publicSearch),
+		"explicit ordinary-mode search did not demote the cached private record");
+	Check(PrivateSearchOnly(nullptr, 42, &privateSearch),
+		"unacknowledged local private search lost protection without a remote pair");
+	content.privateSearchDialogIds["42"] = publicSearch;
+	Check(!PrivateSearchOnly(&content, 42), "acknowledged search removal retained the old restriction");
+	Check(PrivateSearchOnly(&content, 42, &privateSearch),
+		"new local private search did not override an older remote removal");
 	Check(SyncedMessageState(content, 42, 1) == MessageState::Hidden,
 		"an unknown message became public");
 	auto &chat = content.perChat["42"];
