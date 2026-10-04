@@ -359,9 +359,9 @@ std::optional<PrivateAccountsState> DecodePrivateAccounts(std::span<const unsign
 	}
 	auto logins = PrivateAccountLogins();
 	if (version >= 2) {
-		const auto count = reader.integer(2);
-		if (!count || *count > kMaxPrivateAccounts) return std::nullopt;
-		for (auto index = std::uint64_t(0); index != *count; ++index) {
+		const auto loginCount = reader.integer(2);
+		if (!loginCount || *loginCount > kMaxPrivateAccounts) return std::nullopt;
+		for (auto index = std::uint64_t(0); index != *loginCount; ++index) {
 			const auto slot = reader.integer(1);
 			const auto owner = reader.identity();
 			const auto complete = reader.integer(1);

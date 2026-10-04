@@ -289,9 +289,11 @@ public:
 	void finishLogout();
 
 	// Uploads cancel with confirmation.
-	[[nodiscard]] bool uploadsInProgress() const;
-	void uploadsStopWithConfirmation(Fn<void()> done);
-	void uploadsStop();
+	[[nodiscard]] bool uploadsInProgress(bool visibleOnly = false) const;
+	void uploadsStopWithConfirmation(
+		Fn<void()> done,
+		bool visibleOnly = false);
+	void uploadsStop(bool visibleOnly = false);
 
 	[[nodiscard]] rpl::lifetime &lifetime() {
 		return _lifetime;

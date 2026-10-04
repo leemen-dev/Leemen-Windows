@@ -12,6 +12,8 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "boxes/abstract_box.h"
 #include "boxes/premium_limits_box.h"
 #include "lang/lang_keys.h"
+#include "leemen/leemen_private_accounts.h"
+#include "leemen/leemen_private_space.h"
 #include "storage/localimageloader.h"
 #include "storage/file_download.h"
 #include "storage/storage_folder_archive.h"
@@ -301,8 +303,41 @@ Main::Session &Uploader::session() const {
 	return _api->session();
 }
 
-FullMsgId Uploader::currentUploadId() const {
-	return _queue.empty() ? FullMsgId() : _queue.front().itemId;
+FullMsgId Uploader::currentUploadId(bool visibleOnly) const {
+	for (const auto &entry : _queue) {
+		if (!visibleOnly || uploadVisible(entry.itemId)) {
+			return uploadMessageId(entry.itemId);
+		}
+	}
+	for (const auto &[coverId, video] : _videoWaitingCover) {
+		if (!visibleOnly || uploadVisible(coverId)) {
+			return video.fullId;
+		}
+	}
+	return FullMsgId();
+}
+
+FullMsgId Uploader::uploadMessageId(FullMsgId itemId) const {
+	const auto cover = _videoWaitingCover.find(itemId);
+	return (cover != end(_videoWaitingCover))
+		? cover->second.fullId
+		: itemId;
+}
+
+bool Uploader::uploadVisible(FullMsgId itemId) const {
+	const auto id = uploadMessageId(itemId);
+	const auto &space = session().leemen();
+	if (!Leemen::PrivateAccountContentAllowed(&session()) || space.damaged()) {
+		return false;
+	}
+	if (const auto item = session().data().message(id)) {
+		return space.allowsPeer(id.peer) && space.allowsMessage(id)
+			&& !item->isHiddenSavedMessage()
+			&& !(space.configured() && !space.active()
+				&& id.peer == session().userPeerId() && !item->isHistoryEntry());
+	}
+	return id == itemId && !_videoIdToCoverId.contains(itemId)
+		&& (!id.peer || space.allowsPeer(id.peer));
 }
 
 void Uploader::upload(
@@ -581,6 +616,8 @@ void Uploader::finishTranscode(
 }
 
 void Uploader::failed(FullMsgId itemId) {
+	const auto weak = base::make_weak(this);
+	if (_pausedId == itemId) _pausedId = FullMsgId();
 	const auto i = ranges::find(_queue, itemId, &Entry::itemId);
 	if (i != end(_queue)) {
 		if (i->cancelPreparing) {
@@ -589,6 +626,7 @@ void Uploader::failed(FullMsgId itemId) {
 		const auto entry = std::move(*i);
 		_queue.erase(i);
 		notifyFailed(entry);
+		if (!weak) return;
 	} else if (const auto coverId = _videoIdToCoverId.take(itemId)) {
 		if (const auto video = _videoWaitingCover.take(*coverId)) {
 			const auto document = session().data().document(video->id);
@@ -597,8 +635,10 @@ void Uploader::failed(FullMsgId itemId) {
 				document->status = FileUploadFailed;
 			}
 			_documentFailed.fire_copy(video->fullId);
+			if (!weak) return;
 		}
 		failed(*coverId);
+		if (!weak) return;
 	} else if (const auto video = _videoWaitingCover.take(itemId)) {
 		_videoIdToCoverId.remove(video->fullId);
 		const auto document = session().data().document(video->id);
@@ -607,9 +647,11 @@ void Uploader::failed(FullMsgId itemId) {
 			document->status = FileUploadFailed;
 		}
 		_documentFailed.fire_copy(video->fullId);
+		if (!weak) return;
 	}
 	cancelRequests(itemId);
 	maybeFinishFront();
+	if (!weak) return;
 
 	crl::on_main(this, [=] {
 		maybeSend();
@@ -911,10 +953,30 @@ void Uploader::cancel(FullMsgId itemId) {
 	failed(itemId);
 }
 
-void Uploader::cancelAll() {
-	while (!_queue.empty()) {
+void Uploader::cancelAll(bool visibleOnly) {
+	const auto weak = base::make_weak(this);
+	if (visibleOnly) {
+		auto ids = base::flat_set<FullMsgId>();
+		for (const auto &entry : _queue) {
+			if (uploadVisible(entry.itemId)) ids.emplace(uploadMessageId(entry.itemId));
+		}
+		for (const auto &[coverId, video] : _videoWaitingCover) {
+			if (uploadVisible(coverId)) ids.emplace(video.fullId);
+		}
+		for (const auto id : ids) {
+			if (!weak) return;
+			if (uploadVisible(id)) failed(id);
+		}
+		return;
+	}
+	while (weak && !_queue.empty()) {
 		failed(_queue.front().itemId);
 	}
+	if (!weak) return;
+	while (weak && !_videoWaitingCover.empty()) {
+		failed(_videoWaitingCover.begin()->second.fullId);
+	}
+	if (!weak) return;
 	clear();
 	unpause();
 }
@@ -1092,7 +1154,8 @@ void Uploader::removeDcIndex() {
 }
 
 void Uploader::maybeFinishFront() {
-	while (!_queue.empty()) {
+	const auto weak = base::make_weak(this);
+	while (weak && !_queue.empty()) {
 		const auto &entry = _queue.front();
 		if (entry.partsSent >= entry.parts->size()
 			&& entry.docPartsSent >= entry.docPartsCount

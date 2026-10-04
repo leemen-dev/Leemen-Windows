@@ -353,8 +353,11 @@ void Controller::firstShow() {
 }
 
 void Controller::finishFirstShow() {
+	const auto weak = base::make_weak(this);
 	_widget.finishFirstShow();
-	checkThemeEditor();
+	if (weak) {
+		checkThemeEditor();
+	}
 }
 
 Main::Session *Controller::maybeSession() const {

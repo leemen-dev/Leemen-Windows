@@ -13,13 +13,15 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "data/data_folder.h"
 #include "data/data_peer.h"
 #include "data/data_saved_messages.h"
+#include "data/data_saved_sublist.h"
 #include "data/data_session.h"
 #include "data/data_thread.h"
 #include "history/history.h"
+#include "leemen/leemen_private_accounts.h"
+#include "leemen/leemen_private_space.h"
 #include "main/main_account.h"
 #include "main/main_domain.h"
 #include "main/main_session.h"
-#include "leemen/leemen_private_accounts.h"
 #include "window/window_lock_widgets.h"
 
 namespace Window {
@@ -110,9 +112,33 @@ bool SeparateWindowLocked(SeparateId id) {
 			|| thread->session().termsLocked().has_value());
 }
 
+bool SeparateWindowContentAllowed(SeparateId id) {
+	if (id.account) {
+		if (id.account->domain().privateAccounts().hidden(id.account)) {
+			return false;
+		}
+		if (const auto session = id.account->maybeSession()) {
+			if (!Leemen::PrivateAccountContentAllowed(session)) {
+				return false;
+			}
+		}
+	}
+	if (const auto thread = id.thread) {
+		const auto &space = thread->session().leemen();
+		if (!space.allowsPeer(thread->peer()->id)) {
+			return false;
+		}
+		if (const auto sublist = thread->asSublist()) {
+			return space.allowsPeer(sublist->sublistPeer()->id);
+		}
+	}
+	return true;
+}
+
 bool CanShowSeparateWindow(SeparateId id) {
-	return (!id.account || !id.account->domain().privateAccounts().hidden(id.account))
-		&& SeparateWindowThreadAvailable(id) && !SeparateWindowLocked(id);
+	return SeparateWindowContentAllowed(id)
+		&& SeparateWindowThreadAvailable(id)
+		&& !SeparateWindowLocked(id);
 }
 
 } // namespace Window

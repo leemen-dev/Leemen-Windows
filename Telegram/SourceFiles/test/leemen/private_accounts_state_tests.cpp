@@ -323,7 +323,7 @@ void ReservationCodecTests() {
 	damaged[17] = 2;
 	Check(!DecodePrivateAccounts(damaged), "reservation owner environment must be canonical");
 	damaged = bytes;
-	std::fill(damaged.begin() + 9, damaged.begin() + 17, 0);
+	std::fill(damaged.begin() + 9, damaged.begin() + 17, std::uint8_t(0));
 	Check(!DecodePrivateAccounts(damaged), "zero reservation owner rejected");
 	damaged = bytes;
 	damaged[7] = 2;

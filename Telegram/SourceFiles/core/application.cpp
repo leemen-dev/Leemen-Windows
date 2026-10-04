@@ -1143,15 +1143,21 @@ bool Application::uploadPreventsQuit() {
 		if (!account->sessionExists()) {
 			continue;
 		}
-		if (account->session().uploadsInProgress()) {
+		if (account->session().uploadsInProgress(true)) {
 			account->session().uploadsStopWithConfirmation([=] {
+				auto accounts = std::vector<base::weak_ptr<Main::Account>>();
 				for (const auto &[index, account] : _domain->accounts()) {
-					if (account->sessionExists()) {
-						account->session().uploadsStop();
+					accounts.push_back(base::make_weak(account.get()));
+				}
+				for (const auto &weak : accounts) {
+					if (const auto account = weak.get()) {
+						if (account->sessionExists()) {
+							account->session().uploadsStop(true);
+						}
 					}
 				}
 				Quit();
-			});
+			}, true);
 			return true;
 		}
 	}
@@ -1484,18 +1490,34 @@ Window::Controller *Application::separateWindowFor(
 not_null<Window::Controller*> Application::ensureSeparateWindowFor(
 		Window::SeparateId id,
 		MsgId showAtMsgId) {
-	if (id.account && id.account->domain().privateAccounts().hidden(id.account)) {
-		if (const auto window = activePrimaryWindow()) return window;
-		if (const auto safe = id.account->domain().privateAccounts().safeAccount()) {
-			return ensureSeparateWindowFor(Window::SeparateId(not_null(safe)));
+	const auto weakAccount = base::make_weak(id.account);
+	const auto fallback = [&]() -> not_null<Window::Controller*> {
+		const auto primary = activePrimaryWindow();
+		if (primary && Window::SeparateWindowContentAllowed(primary->id())) {
+			return primary;
 		}
-		Unexpected("No safe primary window for a hidden account.");
+		if (const auto account = weakAccount.get()) {
+			if (const auto safe = account->domain().privateAccounts().safeAccount()) {
+				return ensureSeparateWindowFor(Window::SeparateId(not_null(safe)));
+			}
+		}
+		if (primary) {
+			return primary;
+		}
+		Unexpected("No safe primary window for private content.");
+	};
+	if (!Window::SeparateWindowContentAllowed(id)) {
+		return fallback();
 	}
 	const auto activate = [&](not_null<Window::Controller*> window) {
+		const auto weak = base::make_weak(window);
 		window->activate();
-		return window;
+		return weak && Window::SeparateWindowContentAllowed(weak->id())
+			? not_null(weak.get())
+			: fallback();
 	};
 	if (const auto existing = separateWindowFor(id)) {
+		const auto weak = base::make_weak(existing);
 		if (id.thread
 			&& id.type == Window::SeparateType::Chat
 			&& !passcodeLocked()) {
@@ -1504,7 +1526,7 @@ not_null<Window::Controller*> Application::ensureSeparateWindowFor(
 				showAtMsgId,
 				Window::SectionShow::Way::ClearStack);
 		}
-		return activate(existing);
+		return weak ? activate(not_null(weak.get())) : fallback();
 	}
 
 	Assert(Window::CanShowSeparateWindow(id));
@@ -1513,13 +1535,23 @@ not_null<Window::Controller*> Application::ensureSeparateWindowFor(
 		id,
 		std::make_unique<Window::Controller>(id, showAtMsgId)
 	).first->second.get();
+	const auto weak = base::make_weak(result);
 	processCreatedWindow(result);
+	if (!weak) {
+		return fallback();
+	}
 	if (passcodeLocked()) {
 		result->setupPasscodeLock();
 	}
+	if (!weak) {
+		return fallback();
+	}
 	result->firstShow();
+	if (!weak) {
+		return fallback();
+	}
 	result->finishFirstShow();
-	return activate(result);
+	return weak ? activate(not_null(weak.get())) : fallback();
 }
 
 Window::Controller *Application::windowFor(Window::SeparateId id) const {

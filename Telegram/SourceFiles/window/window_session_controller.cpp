@@ -1393,6 +1393,9 @@ void SessionNavigation::showThread(
 		not_null<Data::Thread*> thread,
 		MsgId itemId,
 		const SectionShow &params) {
+	const auto weak = base::make_weak(this);
+	const auto weakParent = base::make_weak(parentController());
+	const auto weakThread = base::make_weak(thread);
 	if (const auto topic = thread->asTopic()) {
 		showTopic(topic, itemId, params);
 	} else if (const auto sublist = thread->asSublist()) {
@@ -1400,8 +1403,12 @@ void SessionNavigation::showThread(
 	} else {
 		showPeerHistory(thread->asHistory(), params, itemId);
 	}
-	if (parentController()->activeChatCurrent().thread() == thread) {
-		parentController()->content()->hideDragForwardInfo();
+	if (!weak || !weakParent || !weakThread
+		|| weak->parentController() != weakParent.get()) {
+		return;
+	}
+	if (weakParent->activeChatCurrent().thread() == weakThread.get()) {
+		weakParent->content()->hideDragForwardInfo();
 	}
 }
 

@@ -185,8 +185,7 @@ private:
 
 	void resolve(not_null<Main::Session*> session, SessionData &data);
 	void resolveRequestsFinished(
-		not_null<Main::Session*> session,
-		SessionData &data);
+		not_null<Main::Session*> session);
 	void checkFullResolveDone();
 
 	[[nodiscard]] not_null<HistoryItem*> regenerateItem(

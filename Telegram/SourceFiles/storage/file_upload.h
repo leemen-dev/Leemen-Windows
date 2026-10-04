@@ -60,7 +60,8 @@ public:
 	~Uploader();
 
 	[[nodiscard]] Main::Session &session() const;
-	[[nodiscard]] FullMsgId currentUploadId() const;
+	[[nodiscard]] FullMsgId currentUploadId(bool visibleOnly = false) const;
+	[[nodiscard]] bool uploadVisible(FullMsgId itemId) const;
 
 	void upload(
 		FullMsgId itemId,
@@ -68,7 +69,7 @@ public:
 
 	void pause(FullMsgId itemId);
 	void cancel(FullMsgId itemId);
-	void cancelAll();
+	void cancelAll(bool visibleOnly = false);
 
 	[[nodiscard]] rpl::producer<UploadedMedia> photoReady() const {
 		return _photoReady.events();
@@ -176,6 +177,7 @@ private:
 	void processDocumentFailed(FullMsgId itemId);
 
 	void notifyFailed(const Entry &entry);
+	[[nodiscard]] FullMsgId uploadMessageId(FullMsgId itemId) const;
 	void failed(FullMsgId itemId);
 	void cancelRequests(FullMsgId itemId);
 	void cancelAllRequests();
