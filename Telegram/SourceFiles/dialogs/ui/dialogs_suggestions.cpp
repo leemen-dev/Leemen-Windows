@@ -41,6 +41,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "inline_bots/bot_attach_web_view.h"
 #include "lang/lang_keys.h"
 #include "main/main_session.h"
+#include "leemen/leemen_private_space.h"
 #include "settings/settings_common.h"
 #include "settings/settings_credits_graphics.h"
 #include "settings/sections/settings_premium.h"
@@ -1082,6 +1083,9 @@ void MyChannelsController::fill(bool force) {
 }
 
 void MyChannelsController::appendRow(not_null<ChannelData*> channel) {
+	if (!session().leemen().allowsPeer(channel->id)) {
+		return;
+	}
 	auto row = std::make_unique<PeerListRow>(channel);
 	if (channel->membersCountKnown()) {
 		row->setCustomStatus((channel->isBroadcast()
@@ -1172,6 +1176,9 @@ void RecommendationsController::fill() {
 }
 
 void RecommendationsController::appendRow(not_null<ChannelData*> channel) {
+	if (!session().leemen().allowsPeer(channel->id)) {
+		return;
+	}
 	auto row = std::make_unique<ChannelRow>(channel);
 	if (channel->membersCountKnown()) {
 		row->setCustomStatus((channel->isBroadcast()
@@ -1286,6 +1293,9 @@ void RecentAppsController::fill() {
 }
 
 void RecentAppsController::appendRow(not_null<UserData*> bot) {
+	if (!session().leemen().allowsPeer(bot->id)) {
+		return;
+	}
 	auto row = std::make_unique<PeerListRow>(bot);
 	if (const auto count = bot->botInfo->activeUsers) {
 		row->setCustomStatus(
@@ -1355,6 +1365,9 @@ void PopularAppsController::fill() {
 }
 
 void PopularAppsController::appendRow(not_null<UserData*> bot) {
+	if (!session().leemen().allowsPeer(bot->id)) {
+		return;
+	}
 	auto row = std::make_unique<PeerListRow>(bot);
 	if (bot->isBot()) {
 		if (!bot->botInfo->activeUsers && !bot->username().isEmpty()) {
@@ -2803,6 +2816,9 @@ rpl::producer<TopPeersList> TopPeersContent(
 		indices.reserve(top.size());
 		const auto now = base::unixtime::now();
 		for (const auto &peer : top) {
+			if (!session->leemen().allowsPeer(peer->id)) {
+				continue;
+			}
 			const auto user = peer->asUser();
 			if (user->isInaccessible()) {
 				continue;
@@ -2926,7 +2942,10 @@ rpl::producer<TopPeersList> TopPeersContent(
 }
 
 RecentPeersList RecentPeersContent(not_null<Main::Session*> session) {
-	return RecentPeersList{ session->recentPeers().list() };
+	return RecentPeersList{ session->recentPeers().list()
+		| ranges::views::filter([=](not_null<PeerData*> peer) {
+			return session->leemen().allowsRecentSearch(peer->id);
+		}) | ranges::to_vector };
 }
 
 object_ptr<Ui::BoxContent> StarsExamplesBox(

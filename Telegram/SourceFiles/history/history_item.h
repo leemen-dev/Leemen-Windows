@@ -595,6 +595,7 @@ public:
 
 	[[nodiscard]] Data::SavedSublist *savedSublist() const;
 	[[nodiscard]] PeerId sublistPeerId() const;
+	[[nodiscard]] bool isHiddenSavedMessage() const;
 	[[nodiscard]] PeerData *savedFromSender() const;
 	[[nodiscard]] const HiddenSenderInfo *savedFromHiddenSenderInfo() const;
 

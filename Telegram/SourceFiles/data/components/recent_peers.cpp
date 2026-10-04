@@ -12,6 +12,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "data/data_session.h"
 #include "data/data_thread.h"
 #include "history/history.h"
+#include "leemen/leemen_private_space.h"
 #include "main/main_session.h"
 #include "storage/serialize_common.h"
 #include "storage/serialize_peer.h"
@@ -52,6 +53,7 @@ void RecentPeers::remove(not_null<PeerData*> peer) {
 
 void RecentPeers::bump(not_null<PeerData*> peer) {
 	_session->local().readSearchSuggestions();
+	_session->leemen().recordSearch(peer->id);
 
 	if (!_list.empty() && _list.front() == peer) {
 		return;

@@ -9,6 +9,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 
 #include "apiwrap.h"
 #include "base/call_delayed.h"
+#include "base/weak_ptr.h"
 #include "core/application.h"
 #include "data/data_channel.h"
 #include "data/data_community.h"
@@ -28,6 +29,8 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "history/view/history_view_scheduled_section.h"
 #include "info/media/info_media_widget.h"
 #include "lang/lang_keys.h"
+#include "leemen/leemen_private_accounts.h"
+#include "leemen/leemen_private_space.h"
 #include "main/main_account.h"
 #include "main/main_domain.h"
 #include "main/main_session.h"
@@ -90,6 +93,51 @@ constexpr auto kAskedKey = std::string_view("windows_state.asked");
 [[nodiscard]] bool NeedsThread(SeparateType type) {
 	return (type != SeparateType::Primary)
 		&& (type != SeparateType::Archive);
+}
+
+[[nodiscard]] bool SavedChatAllowed(
+		const SavedChat &chat,
+		not_null<Main::Session*> session) {
+	const auto &space = session->leemen();
+	return chat.valid() && space.allowsPeer(chat.peer)
+		&& (!chat.monoforumPeer || space.allowsPeer(chat.monoforumPeer));
+}
+
+[[nodiscard]] bool SavedWindowAllowed(
+		const SavedWindow &data,
+		not_null<Main::Session*> session) {
+	return session->account().maybeSession() == session
+		&& (!data.userPeer || data.userPeer == session->userPeerId().value)
+		&& !session->domain().privateAccounts().hidden(&session->account())
+		&& Leemen::PrivateAccountContentAllowed(session)
+		&& (!NeedsThread(data.type) || SavedChatAllowed(data.thread, session));
+}
+
+[[nodiscard]] Main::Session *SavedWindowSession(
+		const SavedWindow &data,
+		not_null<Main::Domain*> domain) {
+	for (const auto &entry : domain->accounts()) {
+		if (entry.index == data.accountIndex) {
+			return entry.account->maybeSession();
+		}
+	}
+	return nullptr;
+}
+
+[[nodiscard]] bool SanitizeSavedWindow(
+		SavedWindow &data,
+		not_null<Main::Domain*> domain) {
+	const auto session = SavedWindowSession(data, domain);
+	if (!session) {
+		data.title.clear();
+		return true;
+	} else if (!SavedWindowAllowed(data, session)) {
+		return false;
+	}
+	data.chats.erase(ranges::remove_if(data.chats, [=](const auto &chat) {
+		return !SavedChatAllowed(chat, session);
+	}), end(data.chats));
+	return true;
 }
 
 [[nodiscard]] SeparateId StepSeparateId(
@@ -354,7 +402,7 @@ uint64 SavedAccessHash(not_null<PeerData*> peer) {
 struct SavedWindows::Step {
 	SavedWindow data;
 	Main::Session *session = nullptr;
-	std::vector<Data::Thread*> slots;
+	std::vector<base::weak_ptr<Data::Thread>> slots;
 	std::unique_ptr<RestoreShell> shell;
 	SeparateId createdId = SeparateId(nullptr);
 	int id = 0;
@@ -388,6 +436,25 @@ SavedWindows::SavedWindows(not_null<Core::Application*> app)
 		_toRestore = Deserialize(
 			app->settings().readPref<QByteArray>(kPrefKey));
 	}
+	app->domain().privateAccounts().changes() | rpl::on_next([=] {
+		while (true) {
+			const auto i = ranges::find_if(_steps, [=](const auto &step) {
+				return step->dead || !SavedWindowAllowed(step->data, step->session);
+			});
+			if (i == end(_steps)) break;
+			abortStep(i->get(), false);
+		}
+		for (const auto windows : { &_toRestore, &_undecided, &_closed }) {
+			for (auto i = windows->begin(); i != windows->end();) {
+				if (!SanitizeSavedWindow(*i, &app->domain())) {
+					i = windows->erase(i);
+				} else {
+					++i;
+				}
+			}
+		}
+		scheduleSave();
+	}, _lifetime);
 }
 
 SavedWindows::~SavedWindows() = default;
@@ -458,7 +525,7 @@ QByteArray SavedWindows::collect() const {
 	auto used = std::vector<not_null<Controller*>>();
 	const auto pendingStep = [&](not_null<Controller*> window) {
 		return ranges::any_of(_steps, [&](const auto &step) {
-			return step->created && (step->createdId == window->id());
+			return !step->dead && step->created && (step->createdId == window->id());
 		});
 	};
 	const auto push = [&](not_null<Controller*> window) {
@@ -489,15 +556,22 @@ QByteArray SavedWindows::collect() const {
 		return false;
 	};
 	const auto appendPending = [&](const SavedWindow &window) {
+		auto copy = window;
+		if (!accountExists(copy.accountIndex)
+			|| !SanitizeSavedWindow(copy, &_app->domain())) {
+			return;
+		}
 		const auto same = [&](const SavedWindow &existing) {
-			return SameWindow(existing, window);
+			return SameWindow(existing, copy);
 		};
-		if (!ranges::any_of(list, same)
-			&& accountExists(window.accountIndex)) {
-			list.push_back(window);
+		if (!ranges::any_of(list, same)) {
+			list.push_back(std::move(copy));
 		}
 	};
 	for (const auto &step : _steps) {
+		if (step->dead) {
+			continue;
+		}
 		auto copy = step->data;
 		if (step->shell) {
 			copy.position = step->shell->countPositionForSave();
@@ -531,6 +605,10 @@ std::optional<SavedWindow> SavedWindows::serializeWindow(
 		return {};
 	}
 	const auto session = &controller->session();
+	if (!Leemen::PrivateAccountContentAllowed(session)
+		|| session->domain().privateAccounts().hidden(&session->account())) {
+		return {};
+	}
 	auto result = SavedWindow();
 	for (const auto &entry : _app->domain().accounts()) {
 		if (entry.account.get() == id.account) {
@@ -546,6 +624,9 @@ std::optional<SavedWindow> SavedWindows::serializeWindow(
 	result.sharedMediaType = static_cast<int>(id.sharedMediaType);
 	if (id.thread) {
 		result.thread = SavedChatFromThread(id.thread);
+		if (!SavedChatAllowed(result.thread, session)) {
+			return {};
+		}
 		const auto topic = id.thread->asTopic();
 		const auto peer = id.thread->peer();
 		result.title = topic
@@ -557,6 +638,9 @@ std::optional<SavedWindow> SavedWindows::serializeWindow(
 	result.position = window->widget()->countPositionForSave();
 	if (ReplayableType(id.type)) {
 		result.chats = controller->content()->chatStackForSave();
+		result.chats.erase(ranges::remove_if(result.chats, [=](const auto &chat) {
+			return !SavedChatAllowed(chat, session);
+		}), end(result.chats));
 		if (result.chats.size() > kMaxSavedChats) {
 			result.chats.erase(
 				begin(result.chats),
@@ -856,20 +940,8 @@ void SavedWindows::stashUndecided() {
 }
 
 Main::Session *SavedWindows::sessionFor(const SavedWindow &data) const {
-	auto account = (Main::Account*)nullptr;
-	for (const auto &entry : _app->domain().accounts()) {
-		if (entry.index == data.accountIndex) {
-			account = entry.account.get();
-			break;
-		}
-	}
-	const auto session = account ? account->maybeSession() : nullptr;
-	if (!session
-		|| (data.userPeer != 0
-			&& session->userPeerId().value != data.userPeer)) {
-		return nullptr;
-	}
-	return session;
+	const auto session = SavedWindowSession(data, &_app->domain());
+	return (session && SavedWindowAllowed(data, session)) ? session : nullptr;
 }
 
 void SavedWindows::startStep(SavedWindow &&data) {
@@ -877,6 +949,9 @@ void SavedWindows::startStep(SavedWindow &&data) {
 	if (!session) {
 		return;
 	}
+	data.chats.erase(ranges::remove_if(data.chats, [=](const auto &chat) {
+		return !SavedChatAllowed(chat, session);
+	}), end(data.chats));
 	auto owned = std::make_unique<Step>();
 	const auto step = owned.get();
 	_steps.push_back(std::move(owned));
@@ -885,10 +960,26 @@ void SavedWindows::startStep(SavedWindow &&data) {
 	step->session = session;
 	step->slots.resize(1 + step->data.chats.size(), nullptr);
 	const auto stepId = step->id;
+	const auto weakSession = base::make_weak(session);
+	session->leemen().changes(
+	) | rpl::on_next([=] {
+		const auto step = stepById(stepId);
+		if (!step || (weakSession && SavedWindowAllowed(step->data, weakSession.get()))) {
+			return;
+		}
+		step->dead = true;
+		if (step->shell) {
+			step->shell->hide();
+		}
+		queueFinishStep(stepId);
+	}, step->lifetime);
 	session->account().sessionChanges(
 	) | rpl::on_next([=](Main::Session *) {
 		if (const auto step = stepById(stepId)) {
 			step->dead = true;
+			if (step->shell) {
+				step->shell->hide();
+			}
 			queueFinishStep(stepId);
 		}
 	}, step->lifetime);
@@ -898,6 +989,9 @@ void SavedWindows::startStep(SavedWindow &&data) {
 			? SeparateId(not_null(&session->account()))
 			: SeparateId(SeparateType::Archive, session);
 		ensureStepWindow(step, id, step->data.position);
+	}
+	if (!stepById(stepId)) {
+		return;
 	}
 
 	step->dispatching = true;
@@ -910,6 +1004,9 @@ void SavedWindows::startStep(SavedWindow &&data) {
 	}
 	if (step->data.thread.valid()) {
 		resolveSlot(step, 0);
+	}
+	if (!stepById(stepId)) {
+		return;
 	}
 	const auto count = int(step->data.chats.size());
 	for (auto i = 0; i != count; ++i) {
@@ -940,6 +1037,9 @@ SavedWindows::Step *SavedWindows::stepById(int stepId) const {
 QString SavedWindows::shellTitle(
 		const SavedWindow &data,
 		not_null<Main::Session*> session) const {
+	if (!SavedWindowAllowed(data, session)) {
+		return QString();
+	}
 	const auto settings = _app->settings().windowTitleContent();
 	const auto name = settings.hideChatName
 		? QString()
@@ -956,7 +1056,7 @@ QString SavedWindows::shellTitle(
 		? st::wrap_rtl(session->user()->name())
 		: QString();
 	return name.isEmpty()
-		? (user.isEmpty() ? u"Telegram"_q : user)
+		? (user.isEmpty() ? u"Leemen"_q : user)
 		: user.isEmpty()
 		? name
 		: (name + u" @ "_q + user);
@@ -965,6 +1065,11 @@ QString SavedWindows::shellTitle(
 void SavedWindows::createShell(not_null<Step*> step) {
 	Expects(step->shell == nullptr);
 
+	if (step->dead || !SavedWindowAllowed(step->data, step->session)) {
+		step->dead = true;
+		queueFinishStep(step->id);
+		return;
+	}
 	step->shell = std::make_unique<RestoreShell>(
 		shellTitle(step->data, step->session),
 		step->data.position);
@@ -1001,9 +1106,10 @@ void SavedWindows::finishStep(not_null<Step*> step) {
 	Assert(i != end(_steps));
 	const auto finishing = !step->dead
 		&& !step->shellClosed
-		&& !Core::Quitting();
+		&& !Core::Quitting()
+		&& SavedWindowAllowed(step->data, step->session);
 	const auto id = finishing
-		? StepSeparateId(step->data, step->session, step->slots[0])
+		? StepSeparateId(step->data, step->session, step->slots[0].get())
 		: SeparateId(nullptr);
 	const auto showable = id && SeparateWindowThreadAvailable(id);
 	if (showable && SeparateWindowLocked(id)) {
@@ -1013,7 +1119,8 @@ void SavedWindows::finishStep(not_null<Step*> step) {
 	auto owned = std::move(*i);
 	_steps.erase(i);
 	owned->lifetime.destroy();
-	if (!owned->dead && !Core::Quitting()) {
+	if (!owned->dead && !Core::Quitting()
+		&& SavedWindowAllowed(owned->data, owned->session)) {
 		if (owned->shellClosed) {
 			pushClosed(std::move(owned->data), owned->shell.get());
 		} else if (!showable) {
@@ -1072,7 +1179,7 @@ void SavedWindows::pushClosed(SavedWindow &&data, RestoreShell *shell) {
 }
 
 void SavedWindows::markUnavailable(std::unique_ptr<Step> step) {
-	if (Core::Quitting()) {
+	if (Core::Quitting() || !SavedWindowAllowed(step->data, step->session)) {
 		return;
 	}
 	auto shell = step->shell
@@ -1080,9 +1187,25 @@ void SavedWindows::markUnavailable(std::unique_ptr<Step> step) {
 		: std::make_unique<RestoreShell>(
 			shellTitle(step->data, step->session),
 			step->data.position);
+	const auto saved = step->data;
 	pushClosed(std::move(step->data), shell.get());
 	const auto raw = shell.get();
 	raw->showUnavailable();
+	const auto weakSession = base::make_weak(step->session);
+	rpl::merge(
+		_app->domain().privateAccounts().changes(),
+		step->session->leemen().changes(),
+		step->session->account().sessionChanges() | rpl::to_empty
+	) | rpl::on_next([=] {
+		if (weakSession && SavedWindowAllowed(saved, weakSession.get())) {
+			return;
+		}
+		raw->hide();
+		crl::on_main(this, [=] {
+			const auto i = ranges::find(_deadShells, raw, &std::unique_ptr<RestoreShell>::get);
+			if (i != end(_deadShells)) _deadShells.erase(i);
+		});
+	}, raw->lifetime());
 	raw->closeRequests(
 	) | rpl::on_next([=] {
 		crl::on_main(this, [=] {
@@ -1123,18 +1246,31 @@ void SavedWindows::resolveSlot(not_null<Step*> step, int index) {
 		? step->data.chats[index - 1]
 		: step->data.thread;
 	const auto session = step->session;
+	const auto weakSession = base::make_weak(session);
 	const auto apply = crl::guard(this, [=](Data::Thread *thread) {
 		const auto step = stepById(stepId);
-		if (!step) {
+		if (!step || step->dead) {
 			return;
 		}
-		step->slots[index] = thread;
+		if (!weakSession) {
+			step->dead = true;
+			queueFinishStep(stepId);
+			return;
+		}
+		step->slots[index] = SavedChatAllowed(key, weakSession.get())
+			? thread
+			: nullptr;
 		if (!--step->pending && !step->dispatching) {
 			queueFinishStep(stepId);
 		}
 	});
+	if (!SavedChatAllowed(key, session)) {
+		apply(nullptr);
+		return;
+	}
 	waitPeer(step, key.peer, [=](PeerData *peer) {
-		if (!peer) {
+		if (!weakSession || !stepById(stepId)
+			|| !SavedChatAllowed(key, weakSession.get()) || !peer) {
 			apply(nullptr);
 			return;
 		}
@@ -1147,7 +1283,11 @@ void SavedWindows::resolveSlot(not_null<Step*> step, int index) {
 				apply(topic);
 			} else {
 				forum->requestTopic(key.topicRootId, crl::guard(this, [=] {
-					if (!stepById(stepId)) {
+					if (!weakSession || !stepById(stepId)) {
+						return;
+					}
+					if (!SavedChatAllowed(key, weakSession.get())) {
+						apply(nullptr);
 						return;
 					}
 					const auto forum = peer->forum();
@@ -1160,7 +1300,8 @@ void SavedWindows::resolveSlot(not_null<Step*> step, int index) {
 				return;
 			}
 			waitPeer(step, key.monoforumPeer, [=](PeerData *sublistPeer) {
-				if (!sublistPeer) {
+				if (!weakSession || !stepById(stepId)
+					|| !SavedChatAllowed(key, weakSession.get()) || !sublistPeer) {
 					apply(nullptr);
 				} else if (peer->isSelf()) {
 					apply(session->data().savedMessages().sublist(
@@ -1410,17 +1551,26 @@ void SavedWindows::sendNextBatchRequest(not_null<Main::Session*> session) {
 void SavedWindows::createWindow(const Step &step) {
 	const auto &data = step.data;
 	const auto session = step.session;
-	const auto windowThread = step.slots[0];
+	const auto weakSession = base::make_weak(session);
+	if (!SavedWindowAllowed(data, session)) {
+		return;
+	}
+	const auto windowThread = step.slots[0].get();
+	const auto weakThread = step.slots[0];
 	const auto id = StepSeparateId(data, session, windowThread);
-	if (!id) {
+	if (!id || !CanShowSeparateWindow(id)) {
 		return;
 	}
 	const auto replay = [&](not_null<Controller*> window) {
-		if (!ReplayableType(data.type)) {
+		if (!weakSession || (id.thread && !weakThread)
+			|| window->id() != id
+			|| !SavedWindowAllowed(data, weakSession.get())
+			|| !CanShowSeparateWindow(id)
+			|| !ReplayableType(data.type)) {
 			return;
 		}
 		const auto controller = window->sessionController();
-		if (!controller) {
+		if (!controller || &controller->session() != weakSession.get()) {
 			return;
 		} else if (step.created && controller->activeChatCurrent()) {
 			return;
@@ -1442,7 +1592,7 @@ void SavedWindows::createWindow(const Step &step) {
 		? step.shell->countPositionForSave()
 		: data.position;
 	const auto validPosition = (position.w > 0) && (position.h > 0);
-	const auto wasActive = _app->activeWindow();
+	const auto wasActive = base::make_weak(_app->activeWindow());
 	const auto activeShell = [&]() -> RestoreShell* {
 		for (const auto &other : _steps) {
 			if (other->shell && other->shell->isActiveWindow()) {
@@ -1460,13 +1610,28 @@ void SavedWindows::createWindow(const Step &step) {
 	if (!existed && validPosition) {
 		_restorePosition = position;
 	}
-	const auto window = _app->ensureSeparateWindowFor(id, showAtMsgId);
+	const auto window = base::make_weak(
+		_app->ensureSeparateWindowFor(id, showAtMsgId));
 	_restorePosition = std::nullopt;
+	const auto allowed = [&] {
+		return weakSession && window && (!id.thread || weakThread)
+			&& window->id() == id
+			&& SavedWindowAllowed(data, weakSession.get())
+			&& CanShowSeparateWindow(id);
+	};
+	if (!allowed()) {
+		return;
+	}
 	if (step.shell) {
 		const auto widget = window->widget().get();
 		const auto swap = step.shell->countPositionForSave();
-		InvokeQueued(widget, [=] {
-			widget->applySavedPosition(swap);
+		InvokeQueued(widget, [=, saved = data] {
+			if (weakSession && window && (!id.thread || weakThread)
+				&& window->id() == id
+				&& SavedWindowAllowed(saved, weakSession.get())
+				&& CanShowSeparateWindow(id)) {
+				widget->applySavedPosition(swap);
+			}
 		});
 	} else if (existed && validPosition) {
 		window->widget()->applySavedPosition(position);
@@ -1474,34 +1639,60 @@ void SavedWindows::createWindow(const Step &step) {
 		window->widget()->setWindowState(Qt::WindowMaximized);
 	}
 	if (keepActive) {
-		if (activeShell) {
+		const auto shellAlive = activeShell && (
+			ranges::any_of(_steps, [=](const auto &other) {
+				return other->shell.get() == activeShell;
+			}) || ranges::any_of(_deadShells, [=](const auto &shell) {
+				return shell.get() == activeShell;
+			}));
+		if (shellAlive) {
 			activeShell->activate();
-		} else if (wasActive && wasActive != window) {
+		} else if (wasActive && wasActive.get() != window.get()) {
 			wasActive->activate();
 		}
 	}
-	replay(window);
+	if (allowed()) {
+		replay(not_null(window.get()));
+	}
 }
 
 void SavedWindows::ensureStepWindow(
 		not_null<Step*> step,
 		SeparateId id,
 		Core::WindowPosition position) {
+	if (!SavedWindowAllowed(step->data, step->session)) {
+		return;
+	}
+	const auto stepId = step->id;
+	const auto weakSession = base::make_weak(step->session);
 	const auto existed = (_app->separateWindowFor(id) != nullptr);
 	const auto validPosition = (position.w > 0) && (position.h > 0);
 	if (!existed && validPosition) {
 		_restorePosition = position;
 	}
-	const auto window = _app->ensureSeparateWindowFor(id);
+	const auto window = base::make_weak(_app->ensureSeparateWindowFor(id));
 	_restorePosition = std::nullopt;
+	const auto allowed = [&] {
+		const auto alive = stepById(stepId);
+		return weakSession && window && alive && !alive->dead
+			&& window->id() == id
+			&& SavedWindowAllowed(alive->data, weakSession.get())
+			&& CanShowSeparateWindow(id);
+	};
+	if (!allowed()) {
+		return;
+	}
 	if (existed && validPosition) {
 		window->widget()->applySavedPosition(position);
 	} else if (!existed && position.maximized) {
 		window->widget()->setWindowState(Qt::WindowMaximized);
 	}
-	step->created = true;
-	step->createdId = id;
-	const auto stepId = step->id;
+	if (!allowed()) {
+		return;
+	}
+	const auto alive = stepById(stepId);
+	alive->created = true;
+	alive->createdId = id;
 	window->lifetime().add(crl::guard(this, [=] {
 		if (Core::Quitting()) {
 			return;
@@ -1517,8 +1708,26 @@ void SavedWindows::replayChats(
 		not_null<SessionController*> controller,
 		const Step &step,
 		Data::Thread *windowThread) {
+	const auto weakSession = base::make_weak(step.session);
+	const auto weakWindow = base::make_weak(window);
+	const auto weakController = base::make_weak(controller);
+	const auto windowId = window->id();
+	const auto weakWindowThread = base::make_weak(windowId.thread);
+	const auto allowed = [&] {
+		return weakSession && weakWindow && weakController
+			&& (!windowId.thread || weakWindowThread)
+			&& weakWindow->id() == windowId
+			&& &weakController->session() == weakSession.get()
+			&& weakWindow->sessionController() == weakController.get()
+			&& SavedWindowAllowed(step.data, weakSession.get())
+			&& CanShowSeparateWindow(windowId);
+	};
+	if (!allowed()) {
+		return;
+	}
 	struct Entry {
-		not_null<Data::Thread*> thread;
+		base::weak_ptr<Data::Thread> thread;
+		SavedChat saved;
 		MsgId rootId;
 		MsgId msgId;
 		SavedChatSection section = SavedChatSection::Chat;
@@ -1526,8 +1735,10 @@ void SavedWindows::replayChats(
 	auto entries = std::vector<Entry>();
 	const auto count = int(step.data.chats.size());
 	for (auto i = 0; i != count; ++i) {
-		const auto thread = step.slots[1 + i];
-		if (!thread || !SeparateWindowThreadAvailable(SeparateId(thread))) {
+		const auto thread = step.slots[1 + i].get();
+		if (!thread
+			|| !SavedChatAllowed(step.data.chats[i], step.session)
+			|| !SeparateWindowThreadAvailable(SeparateId(thread))) {
 			continue;
 		}
 		const auto &saved = step.data.chats[i];
@@ -1535,7 +1746,7 @@ void SavedWindows::replayChats(
 		const auto rootId = thread->asHistory() ? saved.topicRootId : MsgId();
 		const auto plain = (section == SavedChatSection::Chat) && !rootId;
 		if (!entries.empty()
-			&& entries.back().thread == thread
+			&& entries.back().thread.get() == thread
 			&& entries.back().rootId == rootId
 			&& entries.back().section == section) {
 			continue;
@@ -1549,7 +1760,7 @@ void SavedWindows::replayChats(
 				}
 			}
 		}
-		entries.push_back({ thread, rootId, saved.msgId, section });
+		entries.push_back({ base::make_weak(thread), saved, rootId, saved.msgId, section });
 	}
 	const auto alreadyShown = (step.data.type == SeparateType::Chat)
 		|| (step.data.type == SeparateType::SavedSublist);
@@ -1558,7 +1769,7 @@ void SavedWindows::replayChats(
 			&& entries.size() == 1
 			&& !entries.front().rootId
 			&& entries.front().section == SavedChatSection::Chat
-			&& entries.front().thread == windowThread)) {
+			&& entries.front().thread.get() == windowThread)) {
 		return;
 	}
 	const auto makeParams = [](SectionShow::Way way) {
@@ -1569,18 +1780,29 @@ void SavedWindows::replayChats(
 		params.allowDuplicateInStack = true;
 		return params;
 	};
+	const auto firstThread = entries.front().thread.get();
+	if (!firstThread) {
+		return;
+	}
 	if (window->id().hasChatsList()
 		&& controller->activeChatCurrent()
-		&& (!entries.front().thread->asHistory()
+		&& (!firstThread->asHistory()
 			|| entries.front().rootId)) {
 		controller->clearSectionStack(
 			makeParams(SectionShow::Way::ClearStack));
 	}
 	for (auto i = 0, size = int(entries.size()); i != size; ++i) {
+		if (!allowed()) {
+			return;
+		}
+		const auto thread = entries[i].thread.get();
+		if (!thread || !SavedChatAllowed(entries[i].saved, weakSession.get())
+			|| !CanShowSeparateWindow(SeparateId(thread))) {
+			continue;
+		}
 		const auto params = makeParams(i
 			? SectionShow::Way::Forward
 			: SectionShow::Way::ClearStack);
-		const auto thread = entries[i].thread;
 		const auto msgId = entries[i].msgId
 			? entries[i].msgId
 			: ShowAtUnreadMsgId;

@@ -1,0 +1,65 @@
+name: Leemen portable core tests
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'Telegram/SourceFiles/leemen/**'
+      - 'Telegram/SourceFiles/test/leemen/**'
+      - 'tools/leemen/**'
+      - '.github/workflows/leemen-core-tests.yml'
+  pull_request:
+    paths:
+      - 'Telegram/SourceFiles/leemen/**'
+      - 'Telegram/SourceFiles/test/leemen/**'
+      - 'tools/leemen/**'
+      - '.github/workflows/leemen-core-tests.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  core-tests:
+    name: Portable components (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install Linux OpenSSL development files
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y libssl-dev
+
+      - name: Install Windows OpenSSL with the runner's vcpkg
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          & "$env:VCPKG_INSTALLATION_ROOT/vcpkg.exe" install openssl:x64-windows
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Configure Linux component tests
+        if: runner.os == 'Linux'
+        run: cmake -S tools/leemen -B out/leemen-core -DCMAKE_BUILD_TYPE=Debug
+
+      - name: Configure Windows component tests
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: >-
+          cmake -S tools/leemen -B out/leemen-core -A x64
+          "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
+          -DVCPKG_TARGET_TRIPLET=x64-windows
+
+      - name: Build component tests
+        run: cmake --build out/leemen-core --config Debug --parallel 2
+
+      - name: Run component tests
+        run: ctest --test-dir out/leemen-core -C Debug --output-on-failure --no-tests=error

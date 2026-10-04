@@ -57,6 +57,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "data/data_forum_topic.h"
 #include "data/data_changes.h"
 #include "main/main_session.h"
+#include "leemen/leemen_private_space.h"
 #include "core/application.h"
 #include "core/core_settings.h"
 #include "styles/style_calls.h"
@@ -283,6 +284,11 @@ void ShareBox::prepareCommentField() {
 }
 
 void ShareBox::prepare() {
+	_descriptor.session->leemen().changes(
+	) | rpl::on_next([=] {
+		closeBox();
+	}, lifetime());
+
 	prepareCommentField();
 
 	_select->resizeToWidth(st::boxWideWidth);
@@ -848,13 +854,15 @@ ShareBox::Inner::Inner(
 
 	const auto self = _descriptor.session->user();
 	const auto selfHistory = self->owner().history(self);
-	if (_descriptor.filterCallback(selfHistory)) {
+	if (_descriptor.session->leemen().allowsPeer(self->id)
+		&& _descriptor.filterCallback(selfHistory)) {
 		_defaultChatsIndexed->addToEnd(selfHistory);
 	}
 	const auto addList = [&](not_null<Dialogs::IndexedList*> list) {
 		for (const auto &row : list->all()) {
 			if (const auto history = row->history()) {
-				if (!history->peer->isSelf()
+				if (_descriptor.session->leemen().allowsPeer(history->peer->id)
+					&& !history->peer->isSelf()
 					&& (history->asForum()
 						|| JoinedCommunityChats(history->peer)
 						|| _descriptor.filterCallback(history))) {
@@ -1656,9 +1664,10 @@ void ShareBox::Inner::applyChatFilter(FilterId id) {
 		const auto addList = [&](not_null<Dialogs::IndexedList*> list) {
 			for (const auto &row : list->all()) {
 				if (const auto history = row->history()) {
-					if (history->asForum()
+					if (_descriptor.session->leemen().allowsPeer(history->peer->id)
+						&& (history->asForum()
 							|| JoinedCommunityChats(history->peer)
-							|| _descriptor.filterCallback(history)) {
+							|| _descriptor.filterCallback(history))) {
 						_customChatsIndexed->addToEnd(history);
 					}
 				}
@@ -1687,7 +1696,9 @@ void ShareBox::Inner::peopleReceived(
 					peerFromMTP(data))) {
 				const auto history = _descriptor.session->data().history(
 					peer);
-				if (!history->asForum()
+				if (!_descriptor.session->leemen().allowsPeer(peer->id)) {
+					continue;
+				} else if (!history->asForum()
 					&& !JoinedCommunityChats(peer)
 					&& !_descriptor.filterCallback(history)) {
 					continue;

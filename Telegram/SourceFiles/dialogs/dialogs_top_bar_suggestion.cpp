@@ -17,6 +17,8 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "data/data_peer_values.h" // Data::AmPremiumValue.
 #include "dialogs/suggestions/suggestion.h"
 #include "dialogs/ui/dialogs_top_bar_suggestion_content.h"
+#include "leemen/leemen_private_space.h"
+#include "leemen/leemen_private_accounts.h"
 #include "main/main_session.h"
 #include "mainwindow.h"
 #include "ui/ui_utility.h"
@@ -124,6 +126,7 @@ rpl::producer<Ui::SlideWrap<Ui::RpWidget>*> TopBarSuggestionValue(
 		const auto processCurrentSuggestion = [=](auto repeat) -> void {
 			auto winner = (const TopBarSuggestions::Spec*)(nullptr);
 			for (auto i = 0; i < int(specs->size()); ++i) {
+				if (!Leemen::PrivateAccountContentAllowed(session)) break;
 				const auto &spec = (*specs)[i];
 				if (spec.available(context)) {
 					winner = &spec;
@@ -245,6 +248,22 @@ rpl::producer<Ui::SlideWrap<Ui::RpWidget>*> TopBarSuggestionValue(
 			if (was != state->wrap || (was && !weak)) {
 				consumer.put_next_copy(state->wrap.get());
 			}
+		}, lifetime);
+
+		session->leemen().changes() | rpl::on_next([=] {
+			// Remove cached names, pictures and collapse snapshots immediately.
+			// Reusing the same winning suggestion would preserve its old peers.
+			state->activeLifetime.destroy();
+			++state->activationId;
+			state->activeSpec = std::nullopt;
+			state->activeSpecDay = std::nullopt;
+			state->prepareSnapshot = nullptr;
+			const auto orphan = state->wrap ? nullptr : state->content;
+			state->content = nullptr;
+			state->wrap = nullptr;
+			delete orphan;
+			processCurrentSuggestion(processCurrentSuggestion);
+			consumer.put_next_copy(state->wrap.get());
 		}, lifetime);
 
 		rpl::duplicate(prepareCollapseSnapshot) | rpl::on_next([=] {

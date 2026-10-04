@@ -84,6 +84,10 @@ namespace Ui {
 struct ColorIndicesCompressed;
 } // namespace Ui
 
+namespace Leemen {
+class PrivateSpace;
+} // namespace Leemen
+
 namespace Main {
 
 class Account;
@@ -213,6 +217,10 @@ public:
 	[[nodiscard]] Data::Session &data() const {
 		return *_data;
 	}
+	[[nodiscard]] Leemen::PrivateSpace &leemen() const {
+		return *_leemen;
+	}
+
 	[[nodiscard]] SessionSettings &settings() const {
 		return *_settings;
 	}
@@ -281,9 +289,11 @@ public:
 	void finishLogout();
 
 	// Uploads cancel with confirmation.
-	[[nodiscard]] bool uploadsInProgress() const;
-	void uploadsStopWithConfirmation(Fn<void()> done);
-	void uploadsStop();
+	[[nodiscard]] bool uploadsInProgress(bool visibleOnly = false) const;
+	void uploadsStopWithConfirmation(
+		Fn<void()> done,
+		bool visibleOnly = false);
+	void uploadsStop(bool visibleOnly = false);
 
 	[[nodiscard]] rpl::lifetime &lifetime() {
 		return _lifetime;
@@ -309,6 +319,7 @@ private:
 	const not_null<Account*> _account;
 
 	const std::unique_ptr<SessionSettings> _settings;
+	const std::unique_ptr<Leemen::PrivateSpace> _leemen;
 	const std::unique_ptr<Data::Changes> _changes;
 	const std::unique_ptr<ApiWrap> _api;
 	const std::unique_ptr<Api::Updates> _updates;

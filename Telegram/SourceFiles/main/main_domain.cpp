@@ -13,6 +13,8 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "core/crash_reports.h"
 #include "main/main_account.h"
 #include "main/main_session.h"
+#include "leemen/leemen_private_accounts.h"
+#include "leemen/leemen_private_accounts_box.h"
 #include "data/data_session.h"
 #include "data/data_changes.h"
 #include "data/data_user.h"
@@ -30,7 +32,8 @@ namespace Main {
 
 Domain::Domain(const QString &dataName)
 : _dataName(dataName)
-, _local(std::make_unique<Storage::Domain>(this, dataName)) {
+, _local(std::make_unique<Storage::Domain>(this, dataName))
+, _privateAccounts(std::make_unique<Leemen::PrivateAccounts>(this)) {
 	_active.changes(
 	) | rpl::take(1) | rpl::on_next([=] {
 		// In case we had a legacy passcoded app we start settings here.
@@ -53,11 +56,16 @@ Domain::Domain(const QString &dataName)
 			: rpl::never<Data::PeerUpdate>();
 	}) | rpl::flatten_latest(
 	) | rpl::on_next([](const Data::PeerUpdate &update) {
-		CrashReports::SetAnnotation("Username", update.peer->username());
+		CrashReports::SetAnnotation("Username", Leemen::PrivateAccountNotificationsAllowed(&update.peer->session())
+			? update.peer->username() : QString());
 	}, _lifetime);
 }
 
 Domain::~Domain() = default;
+
+Leemen::PrivateAccounts &Domain::privateAccounts() const {
+	return *_privateAccounts;
+}
 
 bool Domain::started() const {
 	return !_accounts.empty();
@@ -66,6 +74,7 @@ bool Domain::started() const {
 Storage::StartResult Domain::start(const QByteArray &passcode) {
 	Expects(!started());
 
+	_privateAccounts->start();
 	const auto result = _local->start(passcode);
 	if (result == Storage::StartResult::Success) {
 		activateAfterStarting();
@@ -77,6 +86,7 @@ Storage::StartResult Domain::start(const QByteArray &passcode) {
 }
 
 void Domain::finish() {
+	_privateAccounts->finish();
 	_accountToActivate = -1;
 	_active.reset(nullptr);
 	base::take(_accounts);
@@ -104,6 +114,7 @@ void Domain::accountAddedInStorage(AccountWithIndex accountWithIndex) {
 		}
 	}
 	_accounts.push_back(std::move(accountWithIndex));
+	_privateAccounts->watchAccount(_accounts.back().account.get());
 }
 
 void Domain::activateFromStorage(int index) {
@@ -115,6 +126,7 @@ int Domain::activeForStorage() const {
 }
 
 void Domain::resetWithForgottenPasscode() {
+	if (_privateAccounts->damaged()) return;
 	if (_accounts.empty()) {
 		_local->startFromScratch();
 		activateAfterStarting();
@@ -136,7 +148,11 @@ void Domain::activateAfterStarting() {
 		watchSession(account.get());
 	}
 
-	activate(toActivate);
+	if (const auto safe = _privateAccounts->safeAccount(toActivate)) {
+		activate(safe);
+	} else {
+		Unexpected("No safe account after validated private account startup.");
+	}
 	removePasscodeIfEmpty();
 }
 
@@ -169,10 +185,18 @@ rpl::producer<> Domain::accountsChanges() const {
 	return _accountsChanges.events();
 }
 
+std::vector<not_null<Account*>> Domain::nonHiddenAccounts() const {
+	auto result = orderedAccounts();
+	std::erase_if(result, [&](not_null<Account*> account) {
+		return _privateAccounts->hidden(account);
+	});
+	return result;
+}
+
 Account *Domain::maybeLastOrSomeAuthedAccount() {
 	auto result = (Account*)nullptr;
 	for (const auto &[index, account] : _accounts) {
-		if (!account->sessionExists()) {
+		if (!account->sessionExists() || _privateAccounts->hidden(account.get())) {
 			continue;
 		} else if (index == _lastActiveIndex) {
 			return account.get();
@@ -202,6 +226,10 @@ Account &Domain::active() const {
 
 	Ensures(_active.current() != nullptr);
 	return *_active.current();
+}
+
+Account *Domain::maybeActive() const {
+	return _active.current();
 }
 
 rpl::producer<not_null<Account*>> Domain::activeChanges() const {
@@ -246,6 +274,9 @@ void Domain::updateUnreadBadge() {
 	_unreadBadgeMuted = true;
 	for (const auto &[index, account] : _accounts) {
 		if (const auto session = account->maybeSession()) {
+			if (!Leemen::PrivateAccountNotificationsAllowed(session)) {
+				continue;
+			}
 			const auto data = &session->data();
 			_unreadBadge += data->unreadBadge();
 			if (!data->unreadBadgeMuted()) {
@@ -268,8 +299,17 @@ void Domain::scheduleUpdateUnreadBadge() {
 }
 
 not_null<Main::Account*> Domain::add(MTP::Environment environment) {
+	return not_null(addImpl(environment, nullptr));
+}
+
+Account *Domain::addHidden(not_null<Session*> owner) {
+	if (_accounts.size() + _removingAccountIndices.size() >= std::size_t(maxAccounts())) return nullptr;
+	return addImpl(owner->account().mtp().environment(), owner);
+}
+
+Account *Domain::addImpl(MTP::Environment environment, Session *privateOwner) {
 	Expects(started());
-	Expects(_accounts.size() < kPremiumMaxAccounts);
+	Expects(_accounts.size() + _removingAccountIndices.size() < kPremiumMaxAccounts);
 
 	static const auto cloneConfig = [](const MTP::Config &config) {
 		return std::make_unique<MTP::Config>(config);
@@ -293,17 +333,25 @@ not_null<Main::Account*> Domain::add(MTP::Environment environment) {
 			: std::make_unique<MTP::Config>(environment);
 	}();
 	auto index = 0;
-	while (ranges::contains(_accounts, index, &AccountWithIndex::index)) {
+	while (_removingAccountIndices.contains(index)
+		|| ranges::contains(_accounts, index, &AccountWithIndex::index)) {
 		++index;
 	}
+	Assert(index < kPremiumMaxAccounts);
 	_accounts.push_back(AccountWithIndex{
 		.index = index,
 		.account = std::make_unique<Account>(this, _dataName, index)
 	});
 	const auto account = _accounts.back().account.get();
+	if (privateOwner && !_privateAccounts->reserveLogin(privateOwner, account)) {
+		_accounts.pop_back();
+		return nullptr;
+	}
+	_privateAccounts->watchAccount(account);
 	account->setMtpMainDcId(mainDcId);
 	_local->startAdded(account, std::move(config));
 	watchSession(account);
+	if (privateOwner && !_privateAccounts->persistNewLogin(account)) return nullptr;
 	_accountsChanges.fire({});
 
 	auto &settings = Core::App().settings();
@@ -326,11 +374,12 @@ void Domain::addActivated(MTP::Environment environment, bool newWindow) {
 			activate(account);
 		}
 	};
-	if (accounts().size() < maxAccounts()) {
+	if (accounts().size() + _removingAccountIndices.size() < std::size_t(maxAccounts())) {
 		added(add(environment));
 	} else {
 		for (auto &[index, account] : accounts()) {
 			if (!account->sessionExists()
+				&& !_privateAccounts->reserved(account.get())
 				&& account->mtp().environment() == environment) {
 				added(account.get());
 				break;
@@ -374,7 +423,7 @@ void Domain::closeAccountWindows(not_null<Main::Account*> account) {
 	auto another = (Main::Account*)nullptr;
 	for (auto i = _accounts.begin(); i != _accounts.end(); ++i) {
 		const auto other = not_null(i->account.get());
-		if (other == account) {
+		if (other == account || _privateAccounts->hidden(other)) {
 			continue;
 		} else if (Core::App().separateWindowFor(other)) {
 			const auto that = Core::App().separateWindowFor(account);
@@ -429,6 +478,8 @@ void Domain::removeRedundantAccounts() {
 	const auto was = _accounts.size();
 	for (auto i = _accounts.begin(); i != _accounts.end();) {
 		if (Core::App().separateWindowFor(not_null(i->account.get()))
+			|| i->account.get() == _active.current()
+			|| _privateAccounts->reserved(i->account.get())
 			|| i->account->sessionExists()) {
 			++i;
 			continue;
@@ -441,6 +492,30 @@ void Domain::removeRedundantAccounts() {
 		scheduleWriteAccounts();
 		_accountsChanges.fire({});
 	}
+}
+
+bool Domain::removePrivateLogin(not_null<Account*> account) {
+	if (account->sessionExists() || account->destroyingSession() || account->loggingOut()
+		|| _active.current() == account || Core::App().separateWindowFor(account)) return false;
+	const auto i = ranges::find(_accounts, account.get(), [](const AccountWithIndex &entry) {
+		return entry.account.get();
+	});
+	if (i == _accounts.end()) return false;
+	const auto position = i - _accounts.begin();
+	const auto index = i->index;
+	if (!_removingAccountIndices.emplace(index).second) return false;
+	const auto releaseIndex = gsl::finally([&] { _removingAccountIndices.erase(index); });
+	auto removed = std::move(*i);
+	_accounts.erase(i);
+	if (!_privateAccounts->releaseRemovedLogin(removed.index)) {
+		const auto restorePosition = std::min(position, std::ptrdiff_t(_accounts.size()));
+		_accounts.insert(_accounts.begin() + restorePosition, std::move(removed));
+		return false;
+	}
+	removed.account.reset();
+	_privateAccounts->lock();
+	_accountsChanges.fire({});
+	return true;
 }
 
 void Domain::checkForLastProductionConfig(
@@ -469,6 +544,10 @@ void Domain::maybeActivate(not_null<Main::Account*> account) {
 }
 
 void Domain::activate(not_null<Main::Account*> account) {
+	if (!_privateAccounts->canActivate(account)) {
+		Leemen::ShowPrivateAccountSwitch(account);
+		return;
+	}
 	if (const auto window = Core::App().separateWindowFor(account)) {
 		window->activate();
 	}

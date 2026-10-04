@@ -128,6 +128,7 @@ public:
 		-> ranges::any_view<const DownloadingId*, ranges::category::input>;
 	[[nodiscard]] DownloadProgress loadingProgress() const;
 	[[nodiscard]] rpl::producer<> loadingListChanges() const;
+	[[nodiscard]] rpl::producer<> visibilityChanges() const;
 	[[nodiscard]] auto loadingProgressValue() const
 		-> rpl::producer<DownloadProgress>;
 
@@ -184,8 +185,7 @@ private:
 
 	void resolve(not_null<Main::Session*> session, SessionData &data);
 	void resolveRequestsFinished(
-		not_null<Main::Session*> session,
-		SessionData &data);
+		not_null<Main::Session*> session);
 	void checkFullResolveDone();
 
 	[[nodiscard]] not_null<HistoryItem*> regenerateItem(
@@ -221,6 +221,7 @@ private:
 	int _lastStartedAdded = 0;
 
 	rpl::event_stream<> _loadingListChanges;
+	rpl::event_stream<> _visibilityChanges;
 	rpl::variable<DownloadProgress> _loadingProgress;
 
 	rpl::event_stream<not_null<const DownloadedId*>> _loadedAdded;

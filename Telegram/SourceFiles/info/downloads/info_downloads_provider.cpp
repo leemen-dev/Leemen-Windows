@@ -126,30 +126,13 @@ void Provider::refreshViewer() {
 	auto &manager = Core::App().downloadManager();
 	rpl::single(rpl::empty) | rpl::then(
 		manager.loadingListChanges() | rpl::to_empty
-	) | rpl::on_next([=, &manager] {
-		auto copy = _downloading;
-		for (const auto id : manager.loadingList()) {
-			if (!id->done) {
-				const auto item = id->object.item;
-				if (!copy.remove(item) && !_downloaded.contains(item)) {
-					_downloading.emplace(item);
-					addElementNow({
-						.item = item,
-						.started = id->started,
-						.path = id->path,
-					});
-					trackItemSession(item);
-					refreshPostponed(true);
-				}
-			}
-		}
-		for (const auto &item : copy) {
-			Assert(!_downloaded.contains(item));
-			remove(item);
-		}
-		if (!_fullCount.has_value()) {
-			refreshPostponed(false);
-		}
+	) | rpl::on_next([=] {
+		refreshLoading();
+	}, _lifetime);
+
+	manager.visibilityChanges(
+	) | rpl::on_next([=] {
+		refreshVisibility();
 	}, _lifetime);
 
 	for (const auto id : manager.loadedList()) {
@@ -180,6 +163,46 @@ void Provider::refreshViewer() {
 		}
 	}, _lifetime);
 
+	performAdd();
+	performRefresh();
+}
+
+void Provider::refreshLoading() {
+	auto copy = _downloading;
+	for (const auto id : Core::App().downloadManager().loadingList()) {
+		if (!id->done) {
+			const auto item = id->object.item;
+			if (!copy.remove(item) && !_downloaded.contains(item)) {
+				_downloading.emplace(item);
+				addElementNow({
+					.item = item,
+					.started = id->started,
+					.path = id->path,
+				});
+				trackItemSession(item);
+				refreshPostponed(true);
+			}
+		}
+	}
+	for (const auto &item : copy) {
+		Assert(!_downloaded.contains(item));
+		remove(item);
+	}
+	if (!_fullCount.has_value()) {
+		refreshPostponed(false);
+	}
+}
+
+void Provider::refreshVisibility() {
+	_addPostponed.clear();
+	const auto previous = _elements;
+	for (const auto &element : previous) {
+		remove(element.item);
+	}
+	refreshLoading();
+	for (const auto id : Core::App().downloadManager().loadedList()) {
+		addPostponed(id);
+	}
 	performAdd();
 	performRefresh();
 }

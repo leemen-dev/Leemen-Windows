@@ -25,6 +25,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "history/history_item_components.h"
 #include "history/history_item_helpers.h"
 #include "lang/lang_keys.h"
+#include "leemen/leemen_private_space.h"
 #include "main/main_session.h"
 #include "ui/chat/chat_style.h"
 #include "ui/effects/ripple_animation.h"
@@ -43,6 +44,16 @@ namespace HistoryView {
 namespace {
 
 constexpr auto kNonExpandedLinesLimit = 5;
+
+[[nodiscard]] bool HasHiddenSavedReply(
+		not_null<const Element*> view,
+		not_null<HistoryMessageReply*> data) {
+	return view->history()->peer->isSelf()
+		&& (!view->history()->session().leemen().allowsPeer(
+				data->fields().externalPeerId)
+			|| (data->resolvedMessage
+				&& data->resolvedMessage->isHiddenSavedMessage()));
+}
 
 [[nodiscard]] QImage MakeTaskImage() {
 	const auto diameter = st::normalFont->ascent;
@@ -354,7 +365,10 @@ void Reply::update(
 		not_null<HistoryMessageReply*> data) {
 	const auto item = view->data();
 	const auto &fields = data->fields();
-	const auto message = data->resolvedMessage.get();
+	_hiddenSavedReply = HasHiddenSavedReply(view, data);
+	const auto message = _hiddenSavedReply
+		? nullptr
+		: data->resolvedMessage.get();
 	const auto messageMedia = (message
 			&& (fields.todoItemId || !fields.pollOption.isEmpty()))
 		? message->media()
@@ -380,9 +394,15 @@ void Reply::update(
 	const auto pollAnswer = (messagePoll && !fields.pollOption.isEmpty())
 		? messagePoll->answerByOption(fields.pollOption)
 		: nullptr;
-	const auto story = data->resolvedStory.get();
-	const auto externalMedia = fields.externalMedia.get();
-	if (!_externalSender) {
+	const auto story = _hiddenSavedReply
+		? nullptr
+		: data->resolvedStory.get();
+	const auto externalMedia = _hiddenSavedReply
+		? nullptr
+		: fields.externalMedia.get();
+	if (_hiddenSavedReply) {
+		_externalSender = nullptr;
+	} else if (!_externalSender) {
 		if (const auto id = fields.externalSenderId) {
 			_externalSender = view->history()->owner().peer(id);
 		}
@@ -422,7 +442,9 @@ void Reply::update(
 		.session = &view->history()->session(),
 		.repaint = repaint,
 	}));
-	const auto text = (!_displaying && data->unavailable())
+	const auto text = _hiddenSavedReply
+		? (fields.manualQuote ? fields.quote : TextWithEntities())
+		: (!_displaying && data->unavailable())
 		? TextWithEntities()
 		: task
 		? Ui::Text::Colorized(task->completionDate
@@ -495,6 +517,10 @@ bool Reply::expand() {
 void Reply::setLinkFrom(
 		not_null<Element*> view,
 		not_null<HistoryMessageReply*> data) {
+	if (HasHiddenSavedReply(view, data)) {
+		_link = nullptr;
+		return;
+	}
 	const auto weak = base::make_weak(view);
 	const auto &fields = data->fields();
 	const auto isAdminLogEntry = view->data()->isAdminLogEntry();
@@ -612,6 +638,9 @@ QString Reply::senderName(
 bool Reply::isNameUpdated(
 		not_null<const Element*> view,
 		not_null<HistoryMessageReply*> data) const {
+	if (HasHiddenSavedReply(view, data)) {
+		return false;
+	}
 	if (const auto from = sender(view, data)) {
 		if (_nameVersion < from->nameVersion()) {
 			updateName(view, data, from);
@@ -626,7 +655,8 @@ void Reply::updateName(
 		not_null<HistoryMessageReply*> data,
 		std::optional<PeerData*> resolvedSender) const {
 	auto viaBotUsername = QString();
-	const auto message = data->resolvedMessage.get();
+	const auto hiddenSaved = HasHiddenSavedReply(view, data);
+	const auto message = hiddenSaved ? nullptr : data->resolvedMessage.get();
 	const auto forwarded = message
 		? message->Get<HistoryMessageForwarded>()
 		: nullptr;
@@ -637,11 +667,14 @@ void Reply::updateName(
 	}
 	const auto history = view->history();
 	const auto &fields = data->fields();
-	const auto sender = resolvedSender.value_or(this->sender(view, data));
-	const auto externalPeer = fields.externalPeerId
+	const auto sender = hiddenSaved
+		? nullptr
+		: resolvedSender.value_or(this->sender(view, data));
+	const auto externalPeer = !hiddenSaved && fields.externalPeerId
 		? history->owner().peer(fields.externalPeerId).get()
 		: nullptr;
-	const auto displayAsExternal = data->displayAsExternal(view->data());
+	const auto displayAsExternal = !hiddenSaved
+		&& data->displayAsExternal(view->data());
 	const auto groupNameAdded = displayAsExternal
 		&& externalPeer
 		&& (externalPeer != sender)
@@ -655,7 +688,9 @@ void Reply::updateName(
 	const auto shorten = !viaBotUsername.isEmpty()
 		|| groupNameAdded
 		|| originalNameAdded;
-	const auto name = sender
+	const auto name = hiddenSaved
+		? QString()
+		: sender
 		? senderName(sender, shorten)
 		: senderName(view, data, shorten);
 	const auto previewSkip = _hasPreview
@@ -811,6 +846,10 @@ void Reply::paint(
 		int y,
 		int w,
 		bool inBubble) const {
+	const auto data = view->data()->Get<HistoryMessageReply>();
+	if (data && HasHiddenSavedReply(view, data) != _hiddenSavedReply) {
+		return;
+	}
 	const auto st = context.st;
 	const auto stm = context.messageStyle();
 
@@ -1115,6 +1154,9 @@ TextWithEntities Reply::ComposePreviewName(
 		not_null<History*> history,
 		not_null<HistoryItem*> to,
 		const FullReplyTo &replyTo) {
+	if (history->peer->isSelf() && to->isHiddenSavedMessage()) {
+		return {};
+	}
 	const auto sender = [&] {
 		if (const auto from = to->displayFrom()) {
 			return not_null(from);

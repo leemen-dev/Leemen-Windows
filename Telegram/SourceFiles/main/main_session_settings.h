@@ -34,6 +34,32 @@ public:
 	[[nodiscard]] QByteArray serialize() const;
 	void addFromSerialized(const QByteArray &serialized);
 
+	[[nodiscard]] bool sessionSettingsReadFailed() const {
+		return _sessionSettingsReadFailed;
+	}
+	void markSessionSettingsReadFailed() {
+		_sessionSettingsReadFailed = true;
+	}
+	[[nodiscard]] const QByteArray &leemenPrivateSpace() const {
+		return _leemenPrivateSpace;
+	}
+	void setLeemenPrivateSpace(QByteArray value) {
+		_leemenPrivateSpace = std::move(value);
+	}
+	[[nodiscard]] const QByteArray &leemenSync() const {
+		return _leemenSync;
+	}
+	void setLeemenSync(QByteArray value) {
+		_leemenSync = std::move(value);
+	}
+
+	[[nodiscard]] bool leemenOnboardingCompleted() const {
+		return _leemenOnboardingCompleted;
+	}
+	void setLeemenOnboardingCompleted(bool value) {
+		_leemenOnboardingCompleted = value;
+	}
+
 	void setSupportSwitch(Support::SwitchSettings value) {
 		_supportSwitch = value;
 	}
@@ -250,6 +276,10 @@ private:
 	rpl::variable<bool> _phoneNumberHidden = false;
 
 	std::vector<Data::ReactionId> _extraFavoriteReactions;
+	QByteArray _leemenPrivateSpace;
+	QByteArray _leemenSync;
+	bool _sessionSettingsReadFailed = false;
+	bool _leemenOnboardingCompleted = false;
 
 };
 

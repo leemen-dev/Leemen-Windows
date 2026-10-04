@@ -92,6 +92,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "export/view/export_view_top_bar.h"
 #include "export/view/export_view_panel_controller.h"
 #include "main/main_session.h"
+#include "leemen/leemen_private_space.h"
 #include "main/main_session_settings.h"
 #include "main/main_app_config.h"
 #include "settings/sections/settings_premium.h"
@@ -1434,6 +1435,15 @@ void MainWidget::showHistory(
 		PeerId peerId,
 		const SectionShow &params,
 		MsgId showAtMsgId) {
+	if (peerId && !session().leemen().allowsPeer(peerId)) {
+		return;
+	}
+	if (peerId == session().userPeerId()) {
+		if (const auto item = session().data().message(peerId, showAtMsgId);
+			item && item->isHiddenSavedMessage()) {
+			return;
+		}
+	}
 	if (peerId && _controller->window().locked()) {
 		if (params.activation != anim::activation::background) {
 			_controller->window().activate();
@@ -1446,6 +1456,9 @@ void MainWidget::showHistory(
 			if (showAtMsgId > 0) {
 				showAtMsgId = -showAtMsgId;
 			}
+		}
+		if (!session().leemen().allowsPeer(peerId)) {
+			return;
 		}
 		const auto unavailable = peer->computeUnavailableReason();
 		if (!unavailable.isEmpty()) {
@@ -1757,6 +1770,11 @@ bool MainWidget::handleDrawToReplyRequest(Data::DrawToReplyRequest request) {
 void MainWidget::showMessage(
 		not_null<const HistoryItem*> item,
 		const SectionShow &params) {
+	if (item->isHiddenSavedMessage()
+		|| !item->history()->session().leemen().allowsPeer(
+			item->history()->peer->id)) {
+		return;
+	}
 	const auto peerId = item->history()->peer->id;
 	const auto itemId = item->id;
 	if (!v::is_null(params.origin)) {
@@ -1866,6 +1884,9 @@ bool MainWidget::saveSectionInStack(
 void MainWidget::showSection(
 		std::shared_ptr<Window::SectionMemento> memento,
 		const SectionShow &params) {
+	if (!_controller->canShowSection(memento.get())) {
+		return;
+	}
 	if (_mainSection && _mainSection->showInternal(
 			memento.get(),
 			params)) {
@@ -1989,6 +2010,9 @@ Window::SectionSlideParams MainWidget::prepareDialogsAnimation() {
 void MainWidget::showNewSection(
 		std::shared_ptr<Window::SectionMemento> memento,
 		const SectionShow &params) {
+	if (!_controller->canShowSection(memento.get())) {
+		return;
+	}
 	using Column = Window::Column;
 
 	if (_controller->window().locked()) {

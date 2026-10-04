@@ -946,6 +946,7 @@ private:
 	int _aroundIndex = -1;
 	int _idsLimit = kMinimalIdsLimit;
 	Data::MessagesSlice _slice;
+	std::optional<std::pair<FullMsgId, FullMsgId>> _hiddenSavedPreloadRange;
 	bool _itemsKnownTillEnd = false;
 
 	std::vector<not_null<Element*>> _items;

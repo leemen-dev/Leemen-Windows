@@ -6,6 +6,7 @@ For license and copyright information please follow this link:
 https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "dialogs/dialogs_widget.h"
+#include "leemen/leemen_private_messages_box.h"
 
 #include "base/call_delayed.h"
 #include "base/qt/qt_key_modifiers.h"
@@ -57,6 +58,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "mainwidget.h"
 #include "main/main_domain.h"
 #include "main/main_session.h"
+#include "leemen/leemen_private_space.h"
 #include "main/main_session_settings.h"
 #include "api/api_authorizations.h"
 #include "api/api_chat_filters.h"
@@ -431,6 +433,14 @@ Widget::Widget(
 , _searchTimer([=] { search(); })
 , _peerSearch(&controller->session(), Api::PeerSearch::Type::WithSponsored)
 , _singleMessageSearch(&controller->session()) {
+	session().leemen().changes(
+	) | rpl::on_next([=] {
+		_suggestions = nullptr;
+		_hidingSuggestions.clear();
+		_search->clear();
+		updateSuggestions(anim::type::instant);
+	}, lifetime());
+
 	const auto makeChildListShown = [](PeerId peerId, float64 shown) {
 		return InnerWidget::ChildListShown{ peerId, shown };
 	};
@@ -990,6 +1000,11 @@ void Widget::chosenRow(const ChosenRow &row) {
 	}
 
 	const auto history = row.key.history();
+	if (history && !_searchState.query.isEmpty()
+		&& !session().leemen().allowsPeer(history->peer->id)) {
+		Leemen::ShowPublicMessages(controller(), history->peer->id);
+		return;
+	}
 	const auto topicJump = history
 		? history->peer->forumTopicFor(row.topicJumpRootId)
 		: nullptr;

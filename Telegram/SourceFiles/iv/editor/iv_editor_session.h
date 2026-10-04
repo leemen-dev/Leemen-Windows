@@ -142,5 +142,6 @@ void ShowEditFromFieldBox(
 // to be destroyed from ~QApplication, where the lib_ui native event filter
 // would re-enter the already destroyed Sandbox machinery and crash.
 void CloseAllWindows();
+void CloseWindowsForSession(not_null<Main::Session*> session);
 
 } // namespace Iv::Editor

@@ -21,6 +21,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "media/view/media_view_open_common.h"
 #include "lang/lang_keys.h"
 #include "intro/intro_widget.h"
+#include "leemen/leemen_private_accounts.h"
 #include "mtproto/mtproto_config.h"
 #include "ui/toast/toast.h"
 #include "ui/emoji_config.h"
@@ -144,9 +145,12 @@ void Controller::showAccount(
 		not_null<Main::Account*> account,
 		MsgId singlePeerShowAtMsgId) {
 	Expects(isPrimary() || _id.account == account);
+	if (!account->domain().privateAccounts().canActivate(account)) return;
 
 	const auto prevAccount = _id.account;
 	const auto prevSession = maybeSession();
+	const auto hidePreviousContent = (prevAccount && prevAccount->domain().privateAccounts().hidden(prevAccount))
+		|| (prevSession && !Leemen::PrivateAccountContentAllowed(prevSession));
 	const auto prevSessionUniqueId = prevSession
 		? prevSession->uniqueId()
 		: 0;
@@ -169,14 +173,21 @@ void Controller::showAccount(
 	}
 
 	_id.account->sessionValue(
-	) | rpl::on_next([=](Main::Session *session) {
+	) | rpl::on_next([=, wasPrivateAccount = false](Main::Session *session) mutable {
+		const auto suppressCache = hidePreviousContent || wasPrivateAccount;
+		wasPrivateAccount = account->domain().privateAccounts().hidden(account);
 		const auto was = base::take(_sessionController);
+		if (session && !Leemen::PrivateAccountContentAllowed(session)) {
+			_sessionControllerValue = nullptr;
+			_widget.hide();
+			return;
+		}
 		_sessionController = session
 			? std::make_unique<SessionController>(session, this)
 			: nullptr;
 		_sessionControllerValue = _sessionController.get();
 
-		auto oldContentCache = _widget.grabForSlideAnimation();
+		auto oldContentCache = suppressCache ? QPixmap() : _widget.grabForSlideAnimation();
 		_widget.updateWindowIcon();
 		if (session) {
 			setupSideBar();
@@ -342,8 +353,11 @@ void Controller::firstShow() {
 }
 
 void Controller::finishFirstShow() {
+	const auto weak = base::make_weak(this);
 	_widget.finishFirstShow();
-	checkThemeEditor();
+	if (weak) {
+		checkThemeEditor();
+	}
 }
 
 Main::Session *Controller::maybeSession() const {

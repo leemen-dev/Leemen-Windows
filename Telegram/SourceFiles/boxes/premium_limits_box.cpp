@@ -1071,7 +1071,7 @@ void AccountsLimitBox(
 	const auto premiumLimit = Main::Domain::kPremiumMaxAccounts;
 
 	using Args = Ui::Premium::AccountsRowArgs;
-	const auto accounts = session->domain().orderedAccounts();
+	const auto accounts = session->domain().nonHiddenAccounts();
 	auto promotePossible = ranges::views::all(
 		accounts
 	) | ranges::views::filter([&](not_null<Main::Account*> account) {

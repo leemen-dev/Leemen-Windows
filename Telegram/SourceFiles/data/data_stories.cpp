@@ -22,6 +22,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "history/history.h"
 #include "history/history_item.h"
 #include "lang/lang_keys.h"
+#include "leemen/leemen_private_space.h"
 #include "main/main_app_config.h"
 #include "main/main_session.h"
 #include "ui/layers/show.h"
@@ -190,6 +191,11 @@ Stories::Stories(not_null<Session*> owner)
 , _incrementViewsTimer([=] { sendIncrementViewsRequests(); })
 , _pollingTimer([=] { sendPollingRequests(); })
 , _pollingViewsTimer([=] { sendPollingViewsRequests(); }) {
+	session().leemen().changes(
+	) | rpl::on_next([=] {
+		refreshPrivateSpace();
+	}, _lifetime);
+
 	crl::on_main(this, [=] {
 		session().changes().peerUpdates(
 			Data::PeerUpdate::Flag::Rights
@@ -782,10 +788,31 @@ void Stories::preloadListsMore() {
 }
 
 void Stories::notifySourcesChanged(StorySourcesList list) {
-	_sourcesChanged[static_cast<int>(list)].fire({});
+	const auto index = static_cast<int>(list);
+	_visibleSources[index] = _sources[index]
+		| ranges::views::filter([=](const StoriesSourceInfo &info) {
+			return session().leemen().allowsPeer(info.id);
+		}) | ranges::to_vector;
+	_sourcesChanged[index].fire({});
 	if (list == StorySourcesList::Hidden) {
 		pushHiddenCountsToFolder();
 	}
+}
+
+void Stories::refreshPrivateSpace() {
+	for (const auto list : {
+			StorySourcesList::NotHidden,
+			StorySourcesList::Hidden }) {
+		notifySourcesChanged(list);
+	}
+	const auto mainChanged = rebuildPreloadSources(StorySourcesList::NotHidden);
+	const auto hiddenChanged = rebuildPreloadSources(StorySourcesList::Hidden);
+	setPreloadingInViewer(_toPreloadViewer);
+	if (mainChanged || hiddenChanged || _preloading) {
+		continuePreloading();
+	}
+	sendPollingRequests();
+	sendPollingViewsRequests();
 }
 
 void Stories::pushHiddenCountsToFolder() {
@@ -1132,7 +1159,8 @@ const StoriesSource *Stories::source(PeerId id) const {
 
 const std::vector<StoriesSourceInfo> &Stories::sources(
 		StorySourcesList list) const {
-	return _sources[static_cast<int>(list)];
+	const auto index = static_cast<int>(list);
+	return _visibleSources[index];
 }
 
 bool Stories::sourcesLoaded(StorySourcesList list) const {
@@ -1195,7 +1223,8 @@ void Stories::resolve(FullStoryId id, Fn<void()> done, bool force) {
 }
 
 void Stories::loadAround(FullStoryId id, StoriesContext context) {
-	if (v::is<StoriesContextSingle>(context.data)
+	if (!session().leemen().allowsPeer(id.peer)
+		|| v::is<StoriesContextSingle>(context.data)
 		|| v::is<StoriesContextAlbum>(context.data)) {
 		return;
 	}
@@ -1233,7 +1262,8 @@ void Stories::loadAround(FullStoryId id, StoriesContext context) {
 }
 
 void Stories::markAsRead(FullStoryId id, bool viewed) {
-	if (id.peer == _owner->session().userPeerId()) {
+	if (!session().leemen().allowsPeer(id.peer)
+		|| id.peer == _owner->session().userPeerId()) {
 		return;
 	}
 	const auto maybeStory = lookup(id);
@@ -2335,7 +2365,8 @@ void Stories::decrementPreloadingHiddenSources() {
 
 void Stories::setPreloadingInViewer(std::vector<FullStoryId> ids) {
 	ids.erase(ranges::remove_if(ids, [&](FullStoryId id) {
-		return _preloaded.contains(id);
+		return _preloaded.contains(id)
+			|| !session().leemen().allowsPeer(id.peer);
 	}), end(ids));
 	if (_toPreloadViewer != ids) {
 		_toPreloadViewer = std::move(ids);
@@ -2462,6 +2493,9 @@ void Stories::maybeSchedulePolling(
 		not_null<Story*> story,
 		const PollingSettings &settings,
 		TimeId now) {
+	if (!session().leemen().allowsPeer(story->peer()->id)) {
+		return;
+	}
 	const auto last = story->lastUpdateTime();
 	const auto next = last + pollingInterval(settings);
 	const auto left = std::max(next - now, 0) * crl::time(1000) + 1;
@@ -2474,6 +2508,9 @@ void Stories::sendPollingRequests() {
 	auto min = 0;
 	const auto now = base::unixtime::now();
 	for (const auto &[story, settings] : _pollingSettings) {
+		if (!session().leemen().allowsPeer(story->peer()->id)) {
+			continue;
+		}
 		const auto last = story->lastUpdateTime();
 		const auto next = last + pollingInterval(settings);
 		if (now >= next) {
@@ -2491,11 +2528,14 @@ void Stories::sendPollingRequests() {
 }
 
 void Stories::sendPollingViewsRequests() {
-	if (_pollingViews.empty()) {
+	const auto i = ranges::find_if(_pollingViews, [=](not_null<Story*> story) {
+		return session().leemen().allowsPeer(story->peer()->id);
+	});
+	if (i == end(_pollingViews)) {
 		return;
 	} else if (!_viewsRequestId) {
 		Assert(_viewsDone == nullptr);
-		const auto story = _pollingViews.front();
+		const auto story = *i;
 		loadViewsSlice(story->peer(), story->id(), QString(), nullptr);
 	}
 	_pollingViewsTimer.callOnce(kPollViewsInterval);
@@ -2547,7 +2587,7 @@ bool Stories::rebuildPreloadSources(StorySourcesList list) {
 	}
 	auto now = std::vector<FullStoryId>();
 	auto processed = 0;
-	for (const auto &source : _sources[index]) {
+	for (const auto &source : sources(list)) {
 		const auto i = _all.find(source.id);
 		if (i != end(_all)) {
 			if (const auto id = i->second.toOpen().id) {
@@ -2585,6 +2625,9 @@ void Stories::continuePreloading() {
 }
 
 bool Stories::shouldContinuePreload(FullStoryId id) const {
+	if (!session().leemen().allowsPeer(id.peer)) {
+		return false;
+	}
 	const auto first = ranges::views::concat(
 		_toPreloadViewer,
 		_toPreloadSources[static_cast<int>(StorySourcesList::Hidden)],
@@ -2610,6 +2653,10 @@ FullStoryId Stories::nextPreloadId() const {
 
 void Stories::startPreloading(not_null<Story*> story) {
 	Expects(!_preloaded.contains(story->fullId()));
+
+	if (!session().leemen().allowsPeer(story->peer()->id)) {
+		return;
+	}
 
 	const auto id = story->fullId();
 	auto preloading = std::make_unique<StoryPreload>(story, [=] {

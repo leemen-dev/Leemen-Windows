@@ -6,6 +6,8 @@ For license and copyright information please follow this link:
 https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "core/application.h"
+#include "leemen/leemen_private_accounts.h"
+#include "leemen/leemen_entry_shortcut.h"
 
 #include "data/data_abstract_structure.h"
 #include "data/data_channel.h"
@@ -410,7 +412,7 @@ void Application::run() {
 	) | rpl::on_next([=](not_null<Main::Account*> account) {
 		const auto ordered = _domain->orderedAccounts();
 		const auto it = ranges::find(ordered, account);
-		if (_lastActivePrimaryWindow && it != end(ordered)) {
+		if (_lastActivePrimaryWindow && it != end(ordered) && account->maybeSession()) {
 			const auto index = std::distance(begin(ordered), it);
 			if ((index + 1) > _domain->maxAccounts()) {
 				_lastActivePrimaryWindow->show(Box(
@@ -1141,15 +1143,21 @@ bool Application::uploadPreventsQuit() {
 		if (!account->sessionExists()) {
 			continue;
 		}
-		if (account->session().uploadsInProgress()) {
+		if (account->session().uploadsInProgress(true)) {
 			account->session().uploadsStopWithConfirmation([=] {
+				auto accounts = std::vector<base::weak_ptr<Main::Account>>();
 				for (const auto &[index, account] : _domain->accounts()) {
-					if (account->sessionExists()) {
-						account->session().uploadsStop();
+					accounts.push_back(base::make_weak(account.get()));
+				}
+				for (const auto &weak : accounts) {
+					if (const auto account = weak.get()) {
+						if (account->sessionExists()) {
+							account->session().uploadsStop(true);
+						}
 					}
 				}
 				Quit();
-			});
+			}, true);
 			return true;
 		}
 	}
@@ -1266,7 +1274,7 @@ bool Application::openInternalUrl(const QString &url, QVariant context) {
 }
 
 QString Application::changelogLink() const {
-	return u"https://telegramdesktop.github.io/tdesktop/changelog/"_q;
+	return u"https://github.com/leemen-dev/Leemen-Windows"_q;
 }
 
 bool Application::openCustomUrl(
@@ -1482,11 +1490,34 @@ Window::Controller *Application::separateWindowFor(
 not_null<Window::Controller*> Application::ensureSeparateWindowFor(
 		Window::SeparateId id,
 		MsgId showAtMsgId) {
+	const auto weakAccount = base::make_weak(id.account);
+	const auto fallback = [&]() -> not_null<Window::Controller*> {
+		const auto primary = activePrimaryWindow();
+		if (primary && Window::SeparateWindowContentAllowed(primary->id())) {
+			return primary;
+		}
+		if (const auto account = weakAccount.get()) {
+			if (const auto safe = account->domain().privateAccounts().safeAccount()) {
+				return ensureSeparateWindowFor(Window::SeparateId(not_null(safe)));
+			}
+		}
+		if (primary) {
+			return primary;
+		}
+		Unexpected("No safe primary window for private content.");
+	};
+	if (!Window::SeparateWindowContentAllowed(id)) {
+		return fallback();
+	}
 	const auto activate = [&](not_null<Window::Controller*> window) {
+		const auto weak = base::make_weak(window);
 		window->activate();
-		return window;
+		return weak && Window::SeparateWindowContentAllowed(weak->id())
+			? not_null(weak.get())
+			: fallback();
 	};
 	if (const auto existing = separateWindowFor(id)) {
+		const auto weak = base::make_weak(existing);
 		if (id.thread
 			&& id.type == Window::SeparateType::Chat
 			&& !passcodeLocked()) {
@@ -1495,7 +1526,7 @@ not_null<Window::Controller*> Application::ensureSeparateWindowFor(
 				showAtMsgId,
 				Window::SectionShow::Way::ClearStack);
 		}
-		return activate(existing);
+		return weak ? activate(not_null(weak.get())) : fallback();
 	}
 
 	Assert(Window::CanShowSeparateWindow(id));
@@ -1504,13 +1535,23 @@ not_null<Window::Controller*> Application::ensureSeparateWindowFor(
 		id,
 		std::make_unique<Window::Controller>(id, showAtMsgId)
 	).first->second.get();
+	const auto weak = base::make_weak(result);
 	processCreatedWindow(result);
+	if (!weak) {
+		return fallback();
+	}
 	if (passcodeLocked()) {
 		result->setupPasscodeLock();
 	}
+	if (!weak) {
+		return fallback();
+	}
 	result->firstShow();
+	if (!weak) {
+		return fallback();
+	}
 	result->finishFirstShow();
-	return activate(result);
+	return weak ? activate(not_null(weak.get())) : fallback();
 }
 
 Window::Controller *Application::windowFor(Window::SeparateId id) const {
@@ -2007,6 +2048,9 @@ void Application::startShortcuts() {
 	Shortcuts::Requests(
 	) | rpl::on_next([=](not_null<Shortcuts::Request*> request) {
 		using Command = Shortcuts::Command;
+		request->check(Command::LeemenPrivateSpace) && request->handle([] {
+			return Leemen::HandlePrivateSpaceShortcut();
+		});
 		request->check(Command::Quit) && request->handle([] {
 			Quit();
 			return true;
@@ -2043,7 +2087,7 @@ void Application::RegisterUrlScheme() {
 		.arguments = arguments,
 		.protocol = u"tg"_q,
 		.protocolName = u"Telegram Link"_q,
-		.shortAppName = u"tdesktop"_q,
+		.shortAppName = u"leemen"_q,
 		.longAppName = QCoreApplication::applicationName(),
 		.displayAppName = AppName.utf16(),
 		.displayAppDescription = AppName.utf16(),
@@ -2054,7 +2098,7 @@ void Application::RegisterUrlScheme() {
 		.arguments = arguments,
 		.protocol = u"tonsite"_q,
 		.protocolName = u"TonSite Link"_q,
-		.shortAppName = u"tdesktop"_q,
+		.shortAppName = u"leemen"_q,
 		.longAppName = QCoreApplication::applicationName(),
 		.displayAppName = AppName.utf16(),
 		.displayAppDescription = AppName.utf16(),

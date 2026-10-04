@@ -6,6 +6,7 @@ For license and copyright information please follow this link:
 https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "window/window_main_menu.h"
+#include "leemen/leemen_private_accounts.h"
 
 #include "apiwrap.h"
 #include "base/event_filter.h"
@@ -33,6 +34,9 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "info/profile/info_profile_icon.h"
 #include "info/stories/info_stories_widget.h"
 #include "lang/lang_keys.h"
+#include "leemen/leemen_private_space.h"
+#include "leemen/leemen_entry_shortcut.h"
+#include "leemen/leemen_private_space_box.h"
 #include "main/main_account.h"
 #include "main/main_domain.h"
 #include "main/main_session.h"
@@ -384,8 +388,8 @@ MainMenu::MainMenu(
 	parentResized();
 
 	_telegram->setMarkedText(tr::link(
-		u"Telegram Desktop"_q,
-		u"https://desktop.telegram.org"_q));
+		u"Leemen Desktop"_q,
+		u"https://leemen.app"_q));
 	_telegram->setLinksTrusted();
 	// The canary version is too long for the "Version {version}" form.
 	_version->setMarkedText(
@@ -747,6 +751,26 @@ void MainMenu::setupMenu() {
 		controller->showSettings();
 	});
 
+	if ((Leemen::PrivateSpace::EnrollmentEnabled()
+		|| controller->session().leemen().configured())
+		&& (Leemen::PrivateSpaceEntryVisible() || controller->session().leemen().active())) {
+		auto label = rpl::single(rpl::empty) | rpl::then(
+			controller->session().leemen().changes()
+		) | rpl::map([=] {
+			return controller->session().leemen().active()
+				? tr::lng_leemen_lock(tr::now)
+				: tr::lng_leemen_private_space(tr::now);
+		});
+		addAction(std::move(label), { &st::menuIconLock }
+		)->setClickedCallback([=] {
+			if (controller->session().leemen().active()) {
+				controller->session().leemen().lock(true);
+			} else {
+				Leemen::ShowPrivateSpace(controller);
+			}
+		});
+	}
+
 	_nightThemeToggle = addAction(
 		tr::lng_menu_night_mode(),
 		{ &st::menuIconNightMode }
@@ -947,7 +971,7 @@ OthersUnreadState OtherAccountsUnreadStateCurrent(
 	auto counter = 0;
 	auto allMuted = true;
 	for (const auto &[index, account] : domain.accounts()) {
-		if (account.get() == current) {
+		if (account.get() == current || domain.privateAccounts().hidden(account.get())) {
 			continue;
 		} else if (const auto session = account->maybeSession()) {
 			counter += session->data().unreadWithMentionsBadge();

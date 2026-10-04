@@ -188,7 +188,7 @@ Window::SessionController *ApplyAccountIndex(
 	if (accountIndex <= 0) {
 		return nullptr;
 	}
-	const auto list = Core::App().domain().orderedAccounts();
+	const auto list = Core::App().domain().nonHiddenAccounts();
 	if (accountIndex > int(list.size())) {
 		return nullptr;
 	}

@@ -32,6 +32,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "history/view/reactions/history_view_reactions_strip.h"
 #include "history/view/history_view_paid_reaction_toast.h"
 #include "lang/lang_keys.h"
+#include "leemen/leemen_private_space.h"
 #include "main/main_session.h"
 #include "media/stories/media_stories_caption_full_view.h"
 #include "media/stories/media_stories_delegate.h"
@@ -853,6 +854,9 @@ void Controller::checkMoveByDelta() {
 void Controller::show(
 		not_null<Data::Story*> story,
 		Data::StoriesContext context) {
+	if (!story->session().leemen().allowsPeer(story->peer()->id)) {
+		return;
+	}
 	auto &stories = story->owner().stories();
 	const auto storyId = story->fullId();
 	const auto peer = story->peer();
@@ -973,6 +977,9 @@ void Controller::show(
 void Controller::jumpTo(
 		not_null<Data::Story*> story,
 		Data::StoriesContext context) {
+	if (!story->session().leemen().allowsPeer(story->peer()->id)) {
+		return;
+	}
 	show(story, std::move(context));
 	_delegate->storiesRedisplay(story);
 }
@@ -1024,6 +1031,11 @@ void Controller::subscribeToSession() {
 	if (!_session) {
 		return;
 	}
+	_session->leemen().changes(
+	) | rpl::on_next([=] {
+		_delegate->storiesClose();
+	}, _sessionLifetime);
+
 	_session->changes().storyUpdates(
 		Data::StoryUpdate::Flag::Destroyed
 	) | rpl::on_next([=](Data::StoryUpdate update) {
@@ -1199,7 +1211,7 @@ void Controller::showSibling(
 		std::unique_ptr<Sibling> &sibling,
 		not_null<Main::Session*> session,
 		CachedSource cached) {
-	if (!cached) {
+	if (!cached || !session->leemen().allowsPeer(cached.peerId)) {
 		sibling = nullptr;
 		return;
 	}

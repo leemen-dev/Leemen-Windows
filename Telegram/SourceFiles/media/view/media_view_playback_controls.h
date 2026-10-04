@@ -72,6 +72,7 @@ public:
 	void setLoadingProgress(int64 ready, int64 total);
 	void setTimestamps(std::vector<TimestampData> timestamps);
 	void setInFullScreen(bool inFullScreen);
+	void setPictureInPictureAllowed(bool allowed);
 	void updatePlaybackSpeed(float64 speed);
 	void updateSpeedToggleQuality();
 	[[nodiscard]] bool hasTimestamps() const;

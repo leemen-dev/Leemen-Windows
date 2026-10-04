@@ -20,6 +20,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "history/history_item.h"
 #include "history/history_unread_things.h"
 #include "main/main_session.h"
+#include "leemen/leemen_private_space.h"
 #include "storage/storage_facade.h"
 #include "storage/storage_shared_media.h"
 #include "window/notifications_manager.h"
@@ -46,6 +47,24 @@ SavedMessages::SavedMessages(
 	FilterId(),
 	_owner->maxPinnedChatsLimitValue(this))
 , _loadMore([=] { sendLoadMoreRequests(); }) {
+	session().leemen().changes(
+	) | rpl::on_next([=] {
+		if (_parentChat) {
+			return;
+		}
+		for (const auto &[peer, sublist] : _sublists) {
+			sublist->updateChatListExistence();
+		}
+		if (_activeSubsectionSublist
+			&& !_activeSubsectionSublist->shouldBeInChatList()) {
+			_activeSubsectionSublist = nullptr;
+		}
+		if (_owningHistory) {
+			_owningHistory->updateChatListEntry();
+		}
+		_chatsListChanges.fire({});
+	}, _lifetime);
+
 	// We don't assign _owningHistory for my Saved Messages here,
 	// because the data structures are not ready yet.
 	if (_owningHistory && _owningHistory->inChatList()) {

@@ -8,6 +8,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "data/data_session.h"
 
 #include "main/main_session.h"
+#include "leemen/leemen_private_space.h"
 #include "main/main_session_settings.h"
 #include "main/main_app_config.h"
 #include "apiwrap.h"
@@ -1913,7 +1914,8 @@ void Session::setupUserIsContactViewer() {
 		if (user->isContact()) {
 			const auto history = this->history(user->id);
 			_contactsList.addByName(history);
-			if (!history->inChatList()) {
+			if (!history->inChatList()
+				&& session().leemen().allowsPeer(user->id)) {
 				_contactsNoChatsList.addByName(history);
 			}
 		} else if (const auto history = historyLoaded(user)) {
@@ -3621,11 +3623,11 @@ HistoryItem *Session::addNewMessage(
 }
 
 int Session::unreadBadge() const {
-	return computeUnreadBadge(_chatsList.unreadState());
+	return computeUnreadBadge(_chatsList.visibleUnreadState());
 }
 
 int Session::unreadWithMentionsBadge() const {
-	auto state = _chatsList.unreadState();
+	auto state = _chatsList.visibleUnreadState();
 	if (state.mentions) {
 		state.messages -= state.mentions;
 	}
@@ -3633,19 +3635,21 @@ int Session::unreadWithMentionsBadge() const {
 }
 
 bool Session::unreadBadgeMuted() const {
-	return computeUnreadBadgeMuted(_chatsList.unreadState());
+	return computeUnreadBadgeMuted(_chatsList.visibleUnreadState());
 }
 
 bool Session::unreadWithMentionsBadgeMuted() const {
-	const auto state = _chatsList.unreadState();
+	const auto state = _chatsList.visibleUnreadState();
 	return !state.mentions && computeUnreadBadgeMuted(state);
 }
 
 int Session::unreadBadgeIgnoreOne(Dialogs::Key key) const {
 	const auto remove = (key && key.entry()->inChatList())
-		? key.entry()->chatListUnreadState()
+		? key.folder()
+			? key.folder()->chatsList()->visibleUnreadState()
+			: key.entry()->chatListUnreadState()
 		: Dialogs::UnreadState();
-	return computeUnreadBadge(_chatsList.unreadState() - remove);
+	return computeUnreadBadge(_chatsList.visibleUnreadState() - remove);
 }
 
 bool Session::unreadBadgeMutedIgnoreOne(Dialogs::Key key) const {
@@ -3653,13 +3657,15 @@ bool Session::unreadBadgeMutedIgnoreOne(Dialogs::Key key) const {
 		return false;
 	}
 	const auto remove = (key && key.entry()->inChatList())
-		? key.entry()->chatListUnreadState()
+		? key.folder()
+			? key.folder()->chatsList()->visibleUnreadState()
+			: key.entry()->chatListUnreadState()
 		: Dialogs::UnreadState();
-	return computeUnreadBadgeMuted(_chatsList.unreadState() - remove);
+	return computeUnreadBadgeMuted(_chatsList.visibleUnreadState() - remove);
 }
 
 int Session::unreadOnlyMutedBadge() const {
-	const auto state = _chatsList.unreadState();
+	const auto state = _chatsList.visibleUnreadState();
 	return Core::App().settings().countUnreadMessages()
 		? state.messagesMuted
 		: state.chatsMuted;
@@ -5662,6 +5668,24 @@ not_null<Dialogs::IndexedList*> Session::contactsNoChatsList() {
 void Session::refreshChatListEntry(Dialogs::Key key) {
 	Expects(key.entry()->folderKnown());
 
+	if (const auto sublist = key.sublist()
+		; sublist && !sublist->parentChat()) {
+		const auto source = sublist->sublistPeer()->id;
+		if (source != session().userPeerId()
+			&& source != PeerData::kSavedHiddenAuthorId
+			&& !session().leemen().allowsPeer(source)) {
+			removeChatListEntry(key);
+			return;
+		}
+	}
+
+	if (const auto peer = key.peer()
+		; peer && !session().leemen().allowsPeer(peer->id)) {
+		removeChatListEntry(key);
+		_contactsNoChatsList.remove(key);
+		return;
+	}
+
 	using namespace Dialogs;
 
 	const auto entry = key.entry();
@@ -5768,7 +5792,8 @@ void Session::removeChatListEntry(Dialogs::Key key) {
 		.key = key,
 		.existenceChanged = true
 	});
-	if (_contactsList.contains(key)) {
+	if (_contactsList.contains(key)
+		&& session().leemen().allowsPeer(key.peer()->id)) {
 		if (!_contactsNoChatsList.contains(key)) {
 			_contactsNoChatsList.addByName(key);
 		}

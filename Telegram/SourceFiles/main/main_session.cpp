@@ -7,6 +7,8 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "main/main_session.h"
 
+#include "leemen/leemen_private_space.h"
+
 #include "apiwrap.h"
 #include "api/api_peer_colors.h"
 #include "api/api_updates.h"
@@ -103,6 +105,7 @@ Session::Session(
 : _userId(user.c_user().vid())
 , _account(account)
 , _settings(std::move(settings))
+, _leemen(std::make_unique<Leemen::PrivateSpace>(this))
 , _changes(std::make_unique<Data::Changes>(this))
 , _api(std::make_unique<ApiWrap>(this))
 , _updates(std::make_unique<Api::Updates>(this))
@@ -181,6 +184,8 @@ Session::Session(
 , _fastButtonsBots(std::make_unique<Support::FastButtonsBots>(this))
 , _saveSettingsTimer([=] { saveSettings(); }) {
 	Expects(_settings != nullptr);
+
+	_leemen->start();
 
 	_api->requestTermsUpdate();
 	_api->requestFullPeer(_user);
@@ -538,22 +543,28 @@ void Session::addWindow(not_null<Window::SessionController*> controller) {
 	}) | rpl::distinct_until_changed());
 }
 
-bool Session::uploadsInProgress() const {
-	return !!_uploader->currentUploadId();
+bool Session::uploadsInProgress(bool visibleOnly) const {
+	return !!_uploader->currentUploadId(visibleOnly);
 }
 
-void Session::uploadsStopWithConfirmation(Fn<void()> done) {
-	const auto id = _uploader->currentUploadId();
+void Session::uploadsStopWithConfirmation(Fn<void()> done, bool visibleOnly) {
+	const auto weak = base::make_weak(this);
+	const auto id = _uploader->currentUploadId(visibleOnly);
+	if (!id) {
+		if (done) done();
+		return;
+	}
 	const auto message = data().message(id);
-	const auto exists = (message != nullptr);
+	const auto exists = message && _uploader->uploadVisible(id);
 	const auto window = message
 		? Core::App().windowFor(message->history()->peer)
 		: Core::App().activePrimaryWindow();
 	if (!window) {
-		done();
+		if (done) done();
 		return;
 	}
-	auto box = Box([=](not_null<Ui::GenericBox*> box) {
+	const auto weakWindow = base::make_weak(window);
+	auto box = Box([weak, id, exists, done, visibleOnly](not_null<Ui::GenericBox*> box) {
 		box->addRow(
 			object_ptr<Ui::FlatLabel>(
 				box.get(),
@@ -562,32 +573,46 @@ void Session::uploadsStopWithConfirmation(Fn<void()> done) {
 			st::boxPadding + QMargins(0, 0, 0, st::boxPadding.bottom()));
 		box->setStyle(st::defaultBox);
 		box->addButton(tr::lng_selected_upload_stop(), [=] {
+			const auto weakSession = weak;
+			const auto completion = done;
+			const auto onlyVisible = visibleOnly;
 			box->closeBox();
 
-			uploadsStop();
-			if (done) {
-				done();
+			if (const auto session = weakSession.get()) {
+				session->uploadsStop(onlyVisible);
+			}
+			if (completion) {
+				completion();
 			}
 		}, st::attentionBoxButton);
 		box->addButton(tr::lng_cancel(), [=] { box->closeBox(); });
 		if (exists) {
 			box->addLeftButton(tr::lng_upload_show_file(), [=] {
+				const auto weakSession = weak;
+				const auto itemId = id;
 				box->closeBox();
 
-				if (const auto item = data().message(id)) {
-					if (const auto window = tryResolveWindow()) {
-						window->showMessage(item);
-					}
+				const auto session = weakSession.get();
+				if (!session || !session->_uploader->uploadVisible(itemId)) return;
+				const auto item = session->data().message(itemId);
+				if (!item) return;
+				const auto window = session->tryResolveWindow(item->history()->peer);
+				if (!weakSession || !window) return;
+				const auto weakController = base::make_weak(window);
+				if (!weakController || &weakController->session() != session
+					|| !session->_uploader->uploadVisible(itemId)) return;
+				if (const auto current = session->data().message(itemId)) {
+					weakController->showMessage(current);
 				}
 			});
 		}
 	});
 	window->show(std::move(box));
-	window->activate();
+	if (weakWindow) weakWindow->activate();
 }
 
-void Session::uploadsStop() {
-	_uploader->cancelAll();
+void Session::uploadsStop(bool visibleOnly) {
+	_uploader->cancelAll(visibleOnly);
 }
 
 auto Session::windows() const
@@ -612,8 +637,9 @@ Window::SessionController *Session::tryResolveWindow(
 		}
 	}
 	if (_windows.empty() || forPeer) {
+		const auto weak = base::make_weak(this);
 		domain().activate(_account);
-		if (_windows.empty()) {
+		if (!weak || _windows.empty()) {
 			return nullptr;
 		}
 	}

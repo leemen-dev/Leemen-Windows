@@ -25,6 +25,8 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "api/api_communities.h"
 #include "api/api_global_privacy.h"
 #include "lang/lang_keys.h"
+#include "leemen/leemen_private_space.h"
+#include "leemen/leemen_private_space_box.h"
 #include "lottie/lottie_icon.h"
 #include "ui/boxes/confirm_box.h"
 #include "base/random.h"
@@ -4096,6 +4098,7 @@ void ToggleMessagePinned(
 				MTP_int(itemId.msg)
 			)).done([=](const MTPUpdates &result) {
 				session->api().applyUpdates(result);
+				session->leemen().recordSelfPin(itemId, false);
 			}).send();
 		});
 		navigation->parentController()->show(
@@ -4146,6 +4149,7 @@ void UnpinMessages(
 					MTP_int(item->id)
 				)).done([=](const MTPUpdates &result) {
 					session->api().applyUpdates(result);
+					session->leemen().recordSelfPin(items[index], false);
 					self(self, index + 1);
 				}).send();
 				return;
@@ -4346,6 +4350,22 @@ void FillDialogsEntryMenu(
 		Dialogs::EntryState request,
 		const PeerMenuCallback &callback) {
 	Filler(controller, request, callback).fill();
+	const auto peer = request.key.peer();
+	if (peer
+		&& controller->session().leemen().active()
+		&& controller->session().leemen().canHide(peer->id)) {
+		const auto hide = !controller->session().leemen().hidden(peer->id);
+		callback(hide
+			? tr::lng_leemen_hide_chat(tr::now)
+			: tr::lng_leemen_reveal_chat(tr::now), [=] {
+			if (hide && !controller->session().leemen().canAddHiddenChat(peer->id)) {
+				Leemen::ShowPrivateSpaceLimit(controller);
+			} else {
+				controller->session().leemen().setHidden(peer->id, hide);
+			}
+		}, &st::menuIconLock);
+	}
+
 }
 
 bool FillVideoChatMenu(

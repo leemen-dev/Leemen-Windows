@@ -167,7 +167,7 @@ void ApplyPeerCloudDraft(
 	cloudDraft->richMessageSummary = Iv::FlattenRichPageSummary(richMessage);
 
 	history->setCloudDraft(std::move(cloudDraft));
-	history->applyCloudDraft(topicRootId, monoforumPeerId);
+	history->applyCloudDraftFromServer(topicRootId, monoforumPeerId);
 }
 
 void ClearPeerCloudDraft(
@@ -181,8 +181,8 @@ void ClearPeerCloudDraft(
 		return;
 	}
 
-	history->clearCloudDraft(topicRootId, monoforumPeerId);
-	history->applyCloudDraft(topicRootId, monoforumPeerId);
+	history->clearCloudDraftFromServer(topicRootId, monoforumPeerId);
+	history->applyCloudDraftFromServer(topicRootId, monoforumPeerId);
 }
 
 void SetChatLinkDraft(not_null<PeerData*> peer, TextWithEntities draft) {

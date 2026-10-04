@@ -719,6 +719,35 @@ std::map<ushort, QString> Instance::ParseStrings(
 	return result;
 }
 
+QString Instance::getValue(ushort key) const {
+	Expects(key < _values.size());
+
+	const auto russian = (_id == u"ru"_q)
+		|| (!_id.startsWith('#') && _base && _base->id() == u"ru"_q);
+	if (russian && !_nonDefaultSet[key]
+		&& (!_base || !_base->_nonDefaultSet[key])) {
+		static const auto translations = [] {
+			auto result = std::map<ushort, QString>();
+			const auto path = u":/gui/langs/leemen_ru.strings"_q;
+			const auto parser = FileParser(FileParser::ReadFile(path, path),
+				[&](QLatin1String name, const QByteArray &value) {
+					const auto key = QByteArray(name.data(), name.size());
+					if (key.startsWith("lng_leemen_")) {
+						ParseKeyValue(key, value, [&](ushort index, QString &&text) {
+							result.emplace(index, std::move(text));
+						});
+					}
+				});
+			return parser.errors().isEmpty() ? result : std::map<ushort, QString>();
+		}();
+		const auto i = translations.find(key);
+		if (i != translations.end()) {
+			return i->second;
+		}
+	}
+	return _values[key];
+}
+
 QString Instance::getNonDefaultValue(const QByteArray &key) const {
 	const auto i = _nonDefaultValues.find(key);
 	return (i != end(_nonDefaultValues))

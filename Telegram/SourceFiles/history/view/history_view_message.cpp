@@ -1713,6 +1713,9 @@ int Message::marginBottom() const {
 }
 
 void Message::draw(Painter &p, const PaintContext &context) const {
+	if (data()->isHiddenSavedMessage()) {
+		return;
+	}
 	auto g = countGeometry();
 	if (g.width() < 1) {
 		return;
@@ -4985,6 +4988,9 @@ MessageSelection Message::selectionFromStates(
 }
 
 TextForMimeData Message::selectedText(TextSelection selection) const {
+	if (data()->isHiddenSavedMessage()) {
+		return {};
+	}
 	const auto media = this->media();
 	auto logEntryOriginalResult = TextForMimeData();
 	auto factcheckResult = TextForMimeData();
@@ -5041,6 +5047,9 @@ TextForMimeData Message::selectedText(TextSelection selection) const {
 
 TextForMimeData Message::selectedText(
 		const MessageSelection &selection) const {
+	if (data()->isHiddenSavedMessage()) {
+		return {};
+	}
 	if (const auto flat = selection.flatSelection(); !flat.empty()) {
 		return selectedText(flat);
 	} else if (selection.isRichPage()) {
@@ -5054,6 +5063,9 @@ TextForMimeData Message::selectedText(
 }
 
 SelectedQuote Message::selectedQuote(TextSelection selection) const {
+	if (data()->isHiddenSavedMessage()) {
+		return {};
+	}
 	const auto textItem = this->textItem();
 	const auto item = textItem ? textItem : data().get();
 	const auto &translated = item->translatedText();

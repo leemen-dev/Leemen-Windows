@@ -51,6 +51,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "data/data_saved_sublist.h"
 #include "data/data_session.h"
 #include "main/main_session.h"
+#include "leemen/leemen_private_space.h"
 #include "apiwrap.h"
 #include "settings/sections/settings_premium.h"
 #include "window/themes/window_theme.h"
@@ -971,6 +972,10 @@ void SetupUnreadMentionsMenu(
 			return;
 		}
 		const auto peer = thread->peer();
+		if (!peer->session().leemen().allowsPeer(peer->id)) {
+			done();
+			return;
+		}
 		const auto topic = thread->asTopic();
 		const auto rootId = topic ? topic->rootId() : 0;
 		using Flag = MTPmessages_ReadMentions::Flag;
@@ -1014,6 +1019,10 @@ void SetupUnreadReactionsMenu(
 		const auto topic = thread->asTopic();
 		const auto sublist = thread->asSublist();
 		const auto peer = thread->peer();
+		if (!peer->session().leemen().allowsPeer(peer->id)) {
+			done();
+			return;
+		}
 		const auto rootId = topic ? topic->rootId() : 0;
 		using Flag = MTPmessages_ReadReactions::Flag;
 		peer->session().api().request(MTPmessages_ReadReactions(
@@ -1059,6 +1068,10 @@ void SetupUnreadPollVotesMenu(
 		}
 		const auto topic = thread->asTopic();
 		const auto peer = thread->peer();
+		if (!peer->session().leemen().allowsPeer(peer->id)) {
+			done();
+			return;
+		}
 		const auto rootId = topic ? topic->rootId() : 0;
 		using Flag = MTPmessages_ReadPollVotes::Flag;
 		peer->session().api().request(MTPmessages_ReadPollVotes(

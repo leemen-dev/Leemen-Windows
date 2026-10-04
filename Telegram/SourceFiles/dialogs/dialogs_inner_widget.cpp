@@ -69,6 +69,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "storage/storage_account.h"
 #include "apiwrap.h"
 #include "main/main_session.h"
+#include "leemen/leemen_private_space.h"
 #include "main/main_session_settings.h"
 #include "menu/menu_mark_as_read.h"
 #include "menu/menu_sponsored.h"
@@ -314,6 +315,17 @@ InnerWidget::InnerWidget(
 	setAccessibleName(tr::lng_recent_chats(tr::now));
 
 	_communityViewable.setRepaint([=] { update(); });
+
+	session().leemen().changes(
+	) | rpl::on_next([=] {
+		cancelChatPreview();
+		clearSearchResults();
+		clearPreviewResults();
+		_filterResultsGlobal.clear();
+		refreshFilterResults();
+		clearMouseSelection(true);
+		refresh(true);
+	}, lifetime());
 
 	style::PaletteChanged(
 	) | rpl::on_next([=] {
@@ -903,7 +915,8 @@ void InnerWidget::rebuildCommunitySections() {
 	}
 	const auto owner = &session().data();
 	for (const auto &linked : _openedCommunity->linkedPeers()) {
-		if (linked.peer->isUser()) {
+		if (!session().leemen().allowsPeer(linked.peer->id)
+			|| linked.peer->isUser()) {
 			continue;
 		} else if (Data::CommunityChatJoined(linked.peer)) {
 			continue;
@@ -4308,7 +4321,11 @@ void InnerWidget::refreshFilterResults() {
 		: TextUtilities::PrepareSearchWords(_filter);
 	_filterResults.clear();
 	const auto append = [&](not_null<IndexedList*> list) {
-		const auto results = list->filtered(words);
+		auto results = list->filtered(words);
+		results.erase(ranges::remove_if(results, [&](const auto &row) {
+			const auto peer = row->key().peer();
+			return peer && !session().leemen().allowsPeer(peer->id);
+		}), end(results));
 		auto top = filteredHeight();
 		auto i = _filterResults.insert(
 			end(_filterResults),
@@ -4346,6 +4363,11 @@ void InnerWidget::refreshFilterResults() {
 }
 
 void InnerWidget::appendToFiltered(Key key) {
+	if (const auto peer = key.peer()
+		; peer && !session().leemen().allowsPeer(peer->id)) {
+		return;
+	}
+
 	for (const auto &row : _filterResults) {
 		if (row.key() == key) {
 			return;
@@ -4689,6 +4711,8 @@ void InnerWidget::searchReceived(
 		? _searchState.inChat
 		: Key(_openedForum->history());
 	if (inject
+		&& !inject->isHiddenSavedMessage()
+		&& session().leemen().allowsPeer(inject->history()->peer->id)
 		&& (globalSearch
 			|| !_searchState.inChat
 			|| inject->history() == _searchState.inChat.history())) {
@@ -4706,6 +4730,10 @@ void InnerWidget::searchReceived(
 	auto &results = toPreview ? _previewResults : _searchResults;
 	for (const auto &item : messages) {
 		const auto history = item->history();
+		if (item->isHiddenSavedMessage()
+			|| !session().leemen().allowsPeer(history->peer->id)) {
+			continue;
+		}
 		if (toPreview || !uniquePeers || !hasHistoryInResults(history)) {
 			const auto index = int(results.size());
 			const auto repaint = toPreview
@@ -4720,6 +4748,10 @@ void InnerWidget::searchReceived(
 				break;
 			}
 		}
+	}
+	if (!session().leemen().allowsPeer(session().userPeerId())
+		|| (session().leemen().configured() && !session().leemen().active())) {
+		fullCount = int(results.size());
 	}
 	if (type.migrated) {
 		_searchedMigratedCount = fullCount;
@@ -4745,6 +4777,9 @@ void InnerWidget::peerSearchReceived(Api::PeerSearchResult result) {
 		appendToFiltered(peer->owner().history(peer));
 	}
 	const auto inlist = [&](not_null<PeerData*> peer) {
+		if (!session().leemen().allowsPeer(peer->id)) {
+			return !session().leemen().messageStateReady();
+		}
 		if (const auto history = peer->owner().historyLoaded(peer)) {
 			// Skip existing chats.
 			return history->inChatList();
@@ -4752,6 +4787,13 @@ void InnerWidget::peerSearchReceived(Api::PeerSearchResult result) {
 		return false;
 	};
 	auto added = base::flat_set<not_null<PeerData*>>();
+	if (session().leemen().messageStateReady() && !_peerSearchQuery.isEmpty()) {
+		for (const auto peer : result.my) {
+			if (!session().leemen().allowsPeer(peer->id) && added.emplace(peer).second) {
+				_peerSearchResults.push_back(std::make_unique<PeerSearchResult>(peer));
+			}
+		}
+	}
 	for (const auto &sponsored : result.sponsored) {
 		const auto peer = sponsored.peer;
 		if (inlist(peer) || _sponsoredRemoved.contains(peer)) {

@@ -28,7 +28,7 @@ void RefreshDockMenu(QMenu *menu) {
 		return;
 	}
 
-	const auto accounts = Core::App().domain().orderedAccounts();
+	const auto accounts = Core::App().domain().nonHiddenAccounts();
 	if (accounts.size() > 1 && !Core::App().passcodeLocked()) {
 		menu->addSeparator();
 		const auto profilesHeader = menu->addAction(

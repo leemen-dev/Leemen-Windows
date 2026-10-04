@@ -8,9 +8,12 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "dialogs/dialogs_main_list.h"
 
 #include "data/data_changes.h"
+#include "data/data_folder.h"
 #include "data/data_session.h"
 #include "data/data_chat_filters.h"
 #include "main/main_session.h"
+#include "leemen/leemen_private_space.h"
+#include "leemen/leemen_private_accounts.h"
 #include "history/history_unread_things.h"
 #include "history/history.h"
 
@@ -20,7 +23,8 @@ MainList::MainList(
 	not_null<Main::Session*> session,
 	FilterId filterId,
 	rpl::producer<int> pinnedLimit)
-: _filterId(filterId)
+: _session(session)
+, _filterId(filterId)
 , _all(SortMode::Date, filterId)
 , _pinned(filterId, 1) {
 	_unreadState.known = true;
@@ -29,6 +33,11 @@ MainList::MainList(
 		pinnedLimit
 	) | rpl::on_next([=](int limit) {
 		_pinned.setLimit(std::max(limit, 1));
+	}, _lifetime);
+
+	session->leemen().changes(
+	) | rpl::on_next([=] {
+		recomputeFullListSize();
 	}, _lifetime);
 
 	session->changes().realtimeNameUpdates(
@@ -109,7 +118,13 @@ void MainList::removeEntry(Key key) {
 }
 
 void MainList::recomputeFullListSize() {
-	_fullListSize = std::max(_all.size(), loaded() ? 0 : _cloudListSize);
+	if (!Leemen::PrivateAccountContentAllowed(_session)) {
+		_fullListSize = 0;
+		return;
+	}
+	_fullListSize = std::max(
+		_all.size(),
+		(loaded() || _session->leemen().configured()) ? 0 : _cloudListSize);
 }
 
 void MainList::unreadStateChanged(
@@ -215,6 +230,33 @@ UnreadState MainList::unreadState() const {
 		+ _unreadState.reactions + _unreadState.reactionsMuted
 		+ _unreadState.mentions;
 #endif // Q_OS_WIN
+	return result;
+}
+
+UnreadState MainList::visibleUnreadState() const {
+	if (!Leemen::PrivateAccountContentAllowed(_session)) {
+		return UnreadState{ .known = true };
+	}
+	if (!_session->leemen().configured()) {
+		return unreadState();
+	}
+	auto result = UnreadState();
+	result.known = true;
+	for (const auto &row : _all.all()) {
+		const auto key = row->key();
+		const auto peer = key.peer();
+		if (peer && !_session->leemen().allowsPeer(peer->id)) {
+			continue;
+		}
+		result += key.folder()
+			? key.folder()->chatsList()->visibleUnreadState()
+			: key.entry()->chatListUnreadState();
+	}
+	if (_allAreMuted) {
+		result.messagesMuted = result.messages;
+		result.chatsMuted = result.chats;
+		result.marksMuted = result.marks;
+	}
 	return result;
 }
 

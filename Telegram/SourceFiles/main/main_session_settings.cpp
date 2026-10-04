@@ -34,6 +34,9 @@ SessionSettings::SessionSettings()
 }
 
 QByteArray SessionSettings::serialize() const {
+	const auto leemenPrivateSpace = _sessionSettingsReadFailed
+		? QByteArray(1, char(0xff))
+		: _leemenPrivateSpace;
 	const auto autoDownload = _autoDownload.serialize();
 	auto size = sizeof(qint32) // kVersionTag
 		+ sizeof(qint32) // kVersion
@@ -95,6 +98,10 @@ QByteArray SessionSettings::serialize() const {
 	for (const auto &id : _extraFavoriteReactions) {
 		size += sizeof(quint64) + Serialize::stringSize(id.emoji());
 	}
+
+	size += Serialize::bytearraySize(leemenPrivateSpace);
+	size += Serialize::bytearraySize(_leemenSync);
+	size += sizeof(quint8);
 
 	auto result = QByteArray();
 	result.reserve(size);
@@ -187,6 +194,9 @@ QByteArray SessionSettings::serialize() const {
 		for (const auto &id : _extraFavoriteReactions) {
 			stream << quint64(id.custom()) << id.emoji();
 		}
+		stream << leemenPrivateSpace;
+		stream << _leemenSync;
+		stream << quint8(_leemenOnboardingCompleted ? 1 : 0);
 	}
 
 	Ensures(result.size() == size);
@@ -198,6 +208,7 @@ void SessionSettings::addFromSerialized(const QByteArray &serialized) {
 		return;
 	}
 
+	_sessionSettingsReadFailed = true;
 	auto &app = Core::App().settings();
 
 	QDataStream stream(serialized);
@@ -745,6 +756,21 @@ void SessionSettings::addFromSerialized(const QByteArray &serialized) {
 			}
 		}
 	}
+	if (!stream.atEnd()) {
+		stream >> _leemenPrivateSpace;
+		if (stream.status() != QDataStream::Ok) {
+			_leemenPrivateSpace = QByteArray(1, char(0xff));
+		}
+	}
+	if (!stream.atEnd()) {
+		stream >> _leemenSync;
+	}
+	_leemenOnboardingCompleted = false;
+	if (!stream.atEnd()) {
+		auto completed = quint8(0);
+		stream >> completed;
+		_leemenOnboardingCompleted = (completed == 1);
+	}
 	if (stream.status() != QDataStream::Ok) {
 		LOG(("App Error: "
 			"Bad data for SessionSettings::addFromSerialized()"));
@@ -858,6 +884,7 @@ void SessionSettings::addFromSerialized(const QByteArray &serialized) {
 		app.setThirdColumnWidth(appThirdColumnWidth);
 		app.setThirdSectionExtendedBy(appThirdSectionExtendedBy);
 	}
+	_sessionSettingsReadFailed = false;
 }
 
 void SessionSettings::setSupportChatsTimeSlice(int slice) {

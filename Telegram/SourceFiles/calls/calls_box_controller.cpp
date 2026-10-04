@@ -23,6 +23,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "calls/group/calls_group_common.h"
 #include "calls/group/calls_group_invite_controller.h"
 #include "calls/calls_instance.h"
+#include "leemen/leemen_private_space.h"
 #include "history/history.h"
 #include "history/history_item.h"
 #include "history/history_item_helpers.h"
@@ -206,7 +207,8 @@ void ListController::prepare() {
 			return;
 		}
 		const auto channel = peer->asChannel();
-		if (channel && Data::ChannelHasActiveCall(channel)) {
+		if (session().leemen().allowsPeer(peer->id)
+			&& channel && Data::ChannelHasActiveCall(channel)) {
 			createRow(peer);
 		} else {
 			removeRow(peer);
@@ -568,6 +570,7 @@ void BoxController::loadMoreRows() {
 		MTP_long(0) // hash
 	)).done([this](const MTPmessages_Messages &result) {
 		_loadRequestId = 0;
+		const auto previousOffset = _offsetId;
 
 		auto handleResult = [&](auto &data) {
 			session().data().processUsers(data.vusers());
@@ -586,6 +589,11 @@ void BoxController::loadMoreRows() {
 			LOG(("API Error: received messages.messagesNotModified! (Calls::BoxController::preloadRows)"));
 		} break;
 		default: Unexpected("Type of messages.Messages (Calls::BoxController::preloadRows)");
+		}
+		if (!_allLoaded && !delegate()->peerListFullRowsCount()
+			&& _offsetId && _offsetId != previousOffset
+			&& ++_hiddenPagesLoaded < 16) {
+			loadMoreRows();
 		}
 	}).fail([this] {
 		_loadRequestId = 0;
@@ -665,6 +673,18 @@ void BoxController::receivedCalls(const QVector<MTPMessage> &result) {
 bool BoxController::insertRow(
 		not_null<HistoryItem*> item,
 		InsertWay way) {
+	const auto &space = session().leemen();
+	if (!space.allowsPeer(item->history()->peer->id)
+		|| item->isHiddenSavedMessage()) {
+		return false;
+	}
+	const auto media = item->media();
+	if (const auto call = media ? media->call() : nullptr;
+		call && ranges::any_of(call->otherParticipants, [&](const auto peer) {
+			return !space.allowsPeer(peer->id);
+		})) {
+		return false;
+	}
 	if (auto row = rowForItem(item)) {
 		if (row->canAddItem(item)) {
 			row->addItem(item);

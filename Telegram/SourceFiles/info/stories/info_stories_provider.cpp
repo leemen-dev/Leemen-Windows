@@ -17,6 +17,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "data/data_session.h"
 #include "data/data_stories.h"
 #include "data/data_stories_ids.h"
+#include "leemen/leemen_private_space.h"
 #include "main/main_account.h"
 #include "main/main_session.h"
 #include "history/history_item.h"
@@ -50,6 +51,11 @@ Provider::Provider(not_null<AbstractController*> controller)
 , _history(_peer->owner().history(_peer))
 , _albumId(controller->key().storiesAlbumId())
 , _addingToAlbumId(controller->key().storiesAddToAlbumId()) {
+	_peer->session().leemen().changes(
+	) | rpl::on_next([=] {
+		restart();
+	}, _lifetime);
+
 	style::PaletteChanged(
 	) | rpl::on_next([=] {
 		for (auto &layout : _layouts) {
@@ -106,7 +112,9 @@ bool Provider::isPossiblyMyItem(not_null<const HistoryItem*> item) {
 }
 
 std::optional<int> Provider::fullCount() {
-	return _slice.fullCount();
+	return _peer->session().leemen().allowsPeer(_peer->id)
+		? _slice.fullCount()
+		: std::optional<int>(0);
 }
 
 void Provider::clear() {
@@ -182,6 +190,11 @@ void Provider::jumpToMessage(MsgId messageId, Fn<void(FullMsgId)>) {
 
 void Provider::refreshViewer() {
 	_viewerLifetime.destroy();
+	if (!_peer->session().leemen().allowsPeer(_peer->id)) {
+		_slice = Data::StoriesIdsSlice();
+		_refreshed.fire({});
+		return;
+	}
 	const auto aroundId = _aroundId;
 	auto ids = Data::AlbumStoriesIds(_peer, _albumId, aroundId, _idsLimit);
 	std::move(
@@ -220,6 +233,9 @@ std::vector<ListSection> Provider::fillSections(
 		not_null<Overview::Layout::Delegate*> delegate) {
 	markLayoutsStale();
 	const auto guard = gsl::finally([&] { clearStaleLayouts(); });
+	if (!_peer->session().leemen().allowsPeer(_peer->id)) {
+		return {};
+	}
 
 	auto result = std::vector<ListSection>();
 	auto section = ListSection(Type::PhotoVideo, sectionDelegate());
@@ -324,6 +340,9 @@ BaseLayout *Provider::getLayout(
 }
 
 HistoryItem *Provider::ensureItem(StoryId id) {
+	if (!_peer->session().leemen().allowsPeer(_peer->id)) {
+		return nullptr;
+	}
 	const auto i = _items.find(id);
 	if (i != end(_items)) {
 		return i->second.get();

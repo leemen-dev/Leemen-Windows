@@ -21,6 +21,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "info/stories/info_stories_widget.h"
 #include "info/info_controller.h"
 #include "info/info_memento.h"
+#include "leemen/leemen_private_space.h"
 #include "main/main_session.h"
 #include "media/stories/media_stories_stealth.h"
 #include "lang/lang_keys.h"
@@ -118,12 +119,19 @@ rpl::producer<Content> LastForPeer(not_null<PeerData*> peer) {
 	return rpl::single(
 		peerId
 	) | rpl::then(
-		stories->sourceChanged() | rpl::filter(_1 == peerId)
+		rpl::merge(
+			stories->sourceChanged() | rpl::filter(_1 == peerId),
+			peer->session().leemen().changes() | rpl::map([=] {
+				return peerId;
+			}))
 	) | rpl::map([=] {
 		auto ids = std::vector<StoryId>();
 		auto readTill = StoryId();
 		auto total = 0;
-		if (const auto source = stories->source(peerId)) {
+		const auto source = peer->session().leemen().allowsPeer(peerId)
+			? stories->source(peerId)
+			: nullptr;
+		if (source) {
 			readTill = source->readTill;
 			total = int(source->ids.size());
 			ids = ranges::views::all(source->ids)
@@ -221,6 +229,9 @@ void FillSourceMenu(
 		const ShowMenuRequest &request) {
 	const auto owner = &controller->session().data();
 	const auto peer = owner->peer(PeerId(request.id));
+	if (!peer->session().leemen().allowsPeer(peer->id)) {
+		return;
+	}
 	const auto &add = request.callback;
 	if (peer->isSelf()) {
 		add(tr::lng_stories_archive_button(tr::now), [=] {

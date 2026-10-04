@@ -6,6 +6,7 @@ For license and copyright information please follow this link:
 https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "window/window_lock_widgets.h"
+#include "leemen/leemen_private_accounts.h"
 
 #include "base/platform/base_platform_info.h"
 #include "base/call_delayed.h"
@@ -39,6 +40,9 @@ constexpr auto kSystemUnlockDelay = crl::time(1000);
 } // namespace
 
 PasscodeAttempt TryPasscode(const QString &passcode) {
+	if (Core::App().domain().privateAccounts().damaged()) {
+		return PasscodeAttempt::CorruptPrivateAccounts;
+	}
 	if (passcode.isEmpty()) {
 		return PasscodeAttempt::Empty;
 	} else if (!passcodeCanTry()) {
@@ -50,6 +54,7 @@ PasscodeAttempt TryPasscode(const QString &passcode) {
 		? domain.local().checkPasscode(utf8)
 		: (domain.start(utf8) == Storage::StartResult::Success);
 	if (!correct) {
+		if (domain.privateAccounts().damaged()) return PasscodeAttempt::CorruptPrivateAccounts;
 		cSetPasscodeBadTries(cPasscodeBadTries() + 1);
 		cSetPasscodeLastTry(crl::now());
 		return PasscodeAttempt::Wrong;
@@ -124,8 +129,12 @@ PasscodeLockWidget::PasscodeLockWidget(
 	connect(_passcode, &Ui::MaskedInputField::submitted, [=] { submit(); });
 	_submit->setClickedCallback([=] { submit(); });
 	_logout->setClickedCallback([=] {
-		window->showLogoutConfirmation();
+		if (!Core::App().domain().privateAccounts().damaged()) window->showLogoutConfirmation();
 	});
+	if (Core::App().domain().privateAccounts().damaged()) {
+		_error = tr::lng_leemen_accounts_damaged(tr::now);
+		_logout->hide();
+	}
 
 	using namespace rpl::mappers;
 	if (Core::App().settings().systemUnlockEnabled()) {
@@ -278,6 +287,11 @@ void PasscodeLockWidget::paintContent(QPainter &p) {
 
 void PasscodeLockWidget::submit() {
 	switch (TryPasscode(_passcode->text())) {
+	case PasscodeAttempt::CorruptPrivateAccounts:
+		_error = tr::lng_leemen_accounts_damaged(tr::now);
+		_logout->hide();
+		update();
+		return;
 	case PasscodeAttempt::Empty:
 		_passcode->showError();
 		return;

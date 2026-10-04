@@ -61,6 +61,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "mainwidget.h"
 #include "mainwindow.h"
 #include "main/main_session.h"
+#include "leemen/leemen_private_space.h"
 #include "window/notifications_manager.h"
 #include "window/window_session_controller.h"
 #include "calls/calls_instance.h"
@@ -287,6 +288,12 @@ void History::itemVanished(not_null<HistoryItem*> item) {
 }
 
 void History::takeLocalDraft(not_null<History*> from) {
+	if (privateDraftsActive()
+		|| from->privateDraftsActive()
+		|| !session().leemen().allowsPeer(peer->id)
+		|| !session().leemen().allowsPeer(from->peer->id)) {
+		return;
+	}
 	const auto topicRootId = MsgId(0);
 	const auto monoforumPeerId = PeerId(0);
 	const auto i = from->_drafts.find(
@@ -310,9 +317,10 @@ void History::takeLocalDraft(not_null<History*> from) {
 void History::createLocalDraftFromCloud(
 		MsgId topicRootId,
 		PeerId monoforumPeerId) {
+	const auto key = Data::DraftKey::Local(topicRootId, monoforumPeerId);
 	const auto draft = cloudDraft(topicRootId, monoforumPeerId);
 	if (!draft) {
-		clearLocalDraft(topicRootId, monoforumPeerId);
+		_drafts.remove(key);
 		return;
 	} else if (Data::DraftIsNull(draft) || !draft->date) {
 		return;
@@ -320,18 +328,19 @@ void History::createLocalDraftFromCloud(
 		return;
 	}
 
-	auto existing = localDraft(topicRootId, monoforumPeerId);
+	const auto i = _drafts.find(key);
+	auto existing = (i != _drafts.end()) ? i->second.get() : nullptr;
 	const auto suggestAllowed = suggestDraftAllowed();
 	if (Data::DraftIsNull(existing)
 		|| !existing->date
 		|| draft->date >= existing->date) {
 		if (!existing) {
-			setLocalDraft(CloneDraftForThread(
+			_drafts[key] = CloneDraftForThread(
 				*draft,
 				topicRootId,
 				monoforumPeerId,
-				suggestAllowed));
-			existing = localDraft(topicRootId, monoforumPeerId);
+				suggestAllowed);
+			existing = _drafts[key].get();
 		} else if (existing != draft) {
 			CopyDraftForThread(
 				existing,
@@ -344,18 +353,62 @@ void History::createLocalDraftFromCloud(
 	}
 }
 
+bool History::privateDraftsActive() const {
+	const auto &space = session().leemen();
+	return space.active() && space.hidden(peer->id);
+}
+
+void History::clearPrivateDrafts() {
+	_privateDrafts.clear();
+	_privateForwardDrafts.clear();
+}
+
+Data::Draft *History::composeCloudDraft(
+		MsgId topicRootId,
+		PeerId monoforumPeerId) const {
+	if (!session().leemen().allowsPeer(peer->id)) {
+		return nullptr;
+	}
+	const auto ordinary = cloudDraft(topicRootId, monoforumPeerId);
+	return privateDraftsActive()
+		? _privateDrafts.get(
+			Data::DraftKey::Cloud(topicRootId, monoforumPeerId),
+			ordinary)
+		: ordinary;
+}
+
+void History::clearCloudDraft(MsgId topicRootId, PeerId monoforumPeerId) {
+	if (privateDraftsActive()) {
+		_privateDrafts.set(
+			Data::DraftKey::Cloud(topicRootId, monoforumPeerId),
+			nullptr);
+	} else if (session().leemen().allowsPeer(peer->id)) {
+		clearCloudDraftFromServer(topicRootId, monoforumPeerId);
+	}
+}
+
 Data::Draft *History::draft(Data::DraftKey key) const {
 	if (!key) {
 		return nullptr;
 	}
 	const auto i = _drafts.find(key);
-	return (i != _drafts.end()) ? i->second.get() : nullptr;
+	const auto ordinary = (i != _drafts.end()) ? i->second.get() : nullptr;
+	return (!key.isCloud() && privateDraftsActive())
+		? _privateDrafts.get(key, ordinary)
+		: ordinary;
 }
 
 void History::setDraft(
 		Data::DraftKey key,
 		std::unique_ptr<Data::Draft> &&draft) {
 	if (!key) {
+		return;
+	}
+	if (!key.isCloud() && !session().leemen().allowsPeer(peer->id)) {
+		return;
+	}
+	if (!key.isCloud() && privateDraftsActive()) {
+		_privateDrafts.set(key, std::move(draft));
 		return;
 	}
 	const auto cloudThread = key.isCloud()
@@ -387,6 +440,7 @@ void History::clearDraft(Data::DraftKey key) {
 }
 
 void History::clearDrafts() {
+	clearPrivateDrafts();
 	for (auto &[key, draft] : base::take(_drafts)) {
 		const auto cloudThread = key.isCloud()
 			? threadFor(key.topicRootId(), key.monoforumPeerId())
@@ -402,6 +456,30 @@ Data::Draft *History::createCloudDraft(
 		MsgId topicRootId,
 		PeerId monoforumPeerId,
 		const Data::Draft *fromDraft) {
+	if (!session().leemen().allowsPeer(peer->id)) {
+		return nullptr;
+	} else if (privateDraftsActive()) {
+		auto copy = fromDraft
+			? CloneDraftForThread(
+				*fromDraft,
+				topicRootId,
+				monoforumPeerId,
+				suggestDraftAllowed())
+			: std::make_unique<Data::Draft>();
+		copy->reply.topicRootId = topicRootId;
+		copy->reply.monoforumPeerId = monoforumPeerId;
+		copy->date = Data::DraftIsNull(copy.get()) ? 0 : base::unixtime::now();
+		if (copy->hasRichMessage() || Data::DraftIsNull(copy.get())) {
+			clearLocalDraft(topicRootId, monoforumPeerId);
+		} else {
+			setLocalDraft(std::make_unique<Data::Draft>(*copy));
+		}
+		const auto result = copy.get();
+		_privateDrafts.set(
+			Data::DraftKey::Cloud(topicRootId, monoforumPeerId),
+			std::move(copy));
+		return result;
+	}
 	if (Data::DraftIsNull(fromDraft)) {
 		setCloudDraft(std::make_unique<Data::Draft>(
 			TextWithTags(),
@@ -451,7 +529,7 @@ bool History::skipCloudDraftUpdate(
 		MsgId topicRootId,
 		PeerId monoforumPeerId,
 		TimeId date) const {
-	if (Iv::Editor::IsComposeBoxOpen(
+	if (!privateDraftsActive() && Iv::Editor::IsComposeBoxOpen(
 			&session(),
 			peer->id,
 			topicRootId,
@@ -491,7 +569,9 @@ void History::applyCloudDraft(MsgId topicRootId, PeerId monoforumPeerId) {
 		updateChatListEntry();
 		session().supportHelper().cloudDraftChanged(this);
 	} else {
-		createLocalDraftFromCloud(topicRootId, monoforumPeerId);
+		if (!privateDraftsActive() && session().leemen().allowsPeer(peer->id)) {
+			createLocalDraftFromCloud(topicRootId, monoforumPeerId);
+		}
 		if (const auto thread = threadFor(topicRootId, monoforumPeerId)) {
 			thread->updateChatListSortPosition();
 			if (topicRootId) {
@@ -511,6 +591,16 @@ void History::applyCloudDraft(MsgId topicRootId, PeerId monoforumPeerId) {
 	}
 }
 
+void History::applyCloudDraftFromServer(
+		MsgId topicRootId,
+		PeerId monoforumPeerId) {
+	if ((privateDraftsActive() || !session().leemen().allowsPeer(peer->id))
+		&& (topicRootId || !session().supportMode())) {
+		createLocalDraftFromCloud(topicRootId, monoforumPeerId);
+	}
+	applyCloudDraft(topicRootId, monoforumPeerId);
+}
+
 void History::draftSavedToCloud(MsgId topicRootId, PeerId monoforumPeerId) {
 	if (const auto thread = threadFor(topicRootId, monoforumPeerId)) {
 		thread->updateChatListEntry();
@@ -524,7 +614,11 @@ const Data::ForwardDraft &History::forwardDraft(
 	const auto key = Data::DraftKey::Local(topicRootId, monoforumPeerId);
 	static const auto kEmpty = Data::ForwardDraft();
 	const auto i = _forwardDrafts.find(key);
-	return (i != end(_forwardDrafts)) ? i->second : kEmpty;
+	const auto ordinary = (i != end(_forwardDrafts)) ? &i->second : nullptr;
+	const auto draft = privateDraftsActive()
+		? _privateForwardDrafts.get(key, ordinary)
+		: ordinary;
+	return draft ? *draft : kEmpty;
 }
 
 Data::ResolvedForwardDraft History::resolveForwardDraft(
@@ -553,9 +647,19 @@ void History::setForwardDraft(
 		MsgId topicRootId,
 		PeerId monoforumPeerId,
 		Data::ForwardDraft &&draft) {
+	if (!session().leemen().allowsPeer(peer->id)) {
+		return;
+	}
 	auto changed = false;
 	const auto key = Data::DraftKey::Local(topicRootId, monoforumPeerId);
-	if (draft.ids.empty()) {
+	if (privateDraftsActive()) {
+		if (forwardDraft(topicRootId, monoforumPeerId) != draft) {
+			_privateForwardDrafts.set(
+				key,
+				std::make_unique<Data::ForwardDraft>(std::move(draft)));
+			changed = true;
+		}
+	} else if (draft.ids.empty()) {
 		changed = _forwardDrafts.remove(key);
 	} else {
 		auto &now = _forwardDrafts[key];
@@ -3395,7 +3499,9 @@ bool History::trackUnreadMessages() const {
 }
 
 bool History::shouldBeInChatList() const {
-	if (peer->migrateTo() || !folderKnown()) {
+	if (!session().leemen().allowsPeer(peer->id)
+		|| peer->migrateTo()
+		|| !folderKnown()) {
 		return false;
 	} else if (const auto community = peer->asChannel()
 		; community && community->isCommunity()) {

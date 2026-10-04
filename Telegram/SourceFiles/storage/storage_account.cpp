@@ -20,6 +20,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "main/main_account.h"
 #include "main/main_domain.h"
 #include "main/main_session.h"
+#include "leemen/leemen_private_space.h"
 #include "mtproto/mtproto_config.h"
 #include "mtproto/mtproto_dc_options.h"
 #include "mtproto/mtp_instance.h"
@@ -595,7 +596,7 @@ void Account::writeMapQueued() {
 	});
 }
 
-void Account::writeMap() {
+void Account::writeMap(QByteArray *expectedPayload) {
 	Expects(_localKey != nullptr);
 
 	_writeMapTimer.cancel();
@@ -757,6 +758,9 @@ void Account::writeMap() {
 		for (const auto &[key, value] : _botStoragesMap) {
 			mapData.stream << quint64(value) << SerializePeerId(key);
 		}
+	}
+	if (expectedPayload) {
+		*expectedPayload = mapData.data.mid(sizeof(quint32));
 	}
 	map.writeEncrypted(mapData, _localKey);
 
@@ -1014,6 +1018,56 @@ void Account::writeSessionSettings() {
 	writeSessionSettings(nullptr);
 }
 
+bool Account::writeLeemenSettingsSync() {
+	const auto settings = _owner->getSessionSettings();
+	if (_readingUserSettings || !settings || settings->sessionSettingsReadFailed()) {
+		return false;
+	}
+	const auto expected = settings->serialize();
+	const auto createdSettingsKey = !_settingsKey;
+	auto expectedMap = QByteArray();
+	writeSessionSettings();
+	writeMap(&expectedMap);
+	details::Sync();
+	if (createdSettingsKey && expectedMap.isEmpty()) {
+		return false;
+	}
+	if (!expectedMap.isEmpty()) {
+		auto map = FileReadDescriptor();
+		if (!ReadFile(map, u"map"_q, _basePath)) {
+			return false;
+		}
+		auto salt = QByteArray();
+		auto key = QByteArray();
+		auto encrypted = QByteArray();
+		map.stream >> salt >> key >> encrypted;
+		auto contents = EncryptedDescriptor();
+		if (map.stream.status() != QDataStream::Ok || !map.stream.atEnd()
+			|| !DecryptLocal(contents, encrypted, _localKey)
+			|| contents.buffer.readAll() != expectedMap) {
+			return false;
+		}
+	}
+	auto file = FileReadDescriptor();
+	if (!ReadEncryptedFile(file, _settingsKey, _basePath, _localKey)) {
+		return false;
+	}
+	auto block = quint32();
+	auto size = qint64();
+	auto time = qint32();
+	file.stream >> block;
+	if (block != dbiCacheSettings) {
+		return false;
+	}
+	file.stream >> size >> time >> size >> time >> block;
+	if (file.stream.status() != QDataStream::Ok || block != dbiSessionSettings) {
+		return false;
+	}
+	auto actual = QByteArray();
+	file.stream >> actual;
+	return file.stream.status() == QDataStream::Ok && actual == expected;
+}
+
 void Account::writeSessionSettings(Main::SessionSettings *stored) {
 	if (_readingUserSettings) {
 		LOG(("App Error: attempt to write settings while reading them!"));
@@ -1029,6 +1083,9 @@ void Account::writeSessionSettings(Main::SessionSettings *stored) {
 	auto userDataInstance = stored
 		? stored
 		: _owner->getSessionSettings();
+	if (userDataInstance && userDataInstance->sessionSettingsReadFailed()) {
+		return;
+	}
 	auto userData = userDataInstance
 		? userDataInstance->serialize()
 		: QByteArray();
@@ -1070,10 +1127,18 @@ ReadSettingsContext Account::prepareReadSettingsContext() const {
 }
 
 std::unique_ptr<Main::SessionSettings> Account::readSessionSettings() {
+	const auto damaged = [] {
+		auto result = std::make_unique<Main::SessionSettings>();
+		result->markSessionSettingsReadFailed();
+		return result;
+	};
 	ReadSettingsContext context;
 	FileReadDescriptor userSettings;
 	if (!ReadEncryptedFile(userSettings, _settingsKey, _basePath, _localKey)) {
 		LOG(("App Info: could not read encrypted user settings..."));
+		if (_settingsKey) {
+			return damaged();
+		}
 
 		Local::readOldUserSettings(true, context);
 		auto result = applyReadContext(std::move(context));
@@ -1090,14 +1155,12 @@ std::unique_ptr<Main::SessionSettings> Account::readSessionSettings() {
 		userSettings.stream >> blockId;
 		if (!CheckStreamStatus(userSettings.stream)) {
 			_readingUserSettings = false;
-			writeSessionSettings();
-			return nullptr;
+			return damaged();
 		}
 
 		if (!ReadSetting(blockId, userSettings.stream, userSettings.version, context)) {
 			_readingUserSettings = false;
-			writeSessionSettings();
-			return nullptr;
+			return damaged();
 		}
 	}
 	_readingUserSettings = false;
@@ -1157,6 +1220,24 @@ void Account::writeMtpData() {
 	mtp.writeEncrypted(data, _localKey);
 }
 
+bool Account::writeMtpDataSync() {
+	Expects(_localKey != nullptr);
+	const auto expected = _owner->serializeMtpAuthorization();
+	{
+		FileWriteDescriptor file(ToFilePart(_dataNameKey), BaseGlobalPath(), true);
+		EncryptedDescriptor data(sizeof(quint32) + Serialize::bytearraySize(expected));
+		data.stream << quint32(dbiMtpAuthorization) << expected;
+		file.writeEncrypted(data, _localKey);
+	}
+	auto file = FileReadDescriptor();
+	if (!ReadEncryptedFile(file, ToFilePart(_dataNameKey), BaseGlobalPath(), _localKey)) return false;
+	auto tag = quint32();
+	auto actual = QByteArray();
+	file.stream >> tag >> actual;
+	return file.stream.status() == QDataStream::Ok && file.stream.atEnd()
+		&& tag == dbiMtpAuthorization && actual == expected;
+}
+
 void Account::readMtpData() {
 	auto context = prepareReadSettingsContext();
 
@@ -1195,6 +1276,22 @@ void Account::writeMtpConfig() {
 	EncryptedDescriptor data(size);
 	data.stream << serialized;
 	file.writeEncrypted(data, _localKey);
+}
+
+bool Account::writeMtpConfigSync() {
+	Expects(_localKey != nullptr);
+	const auto expected = _owner->mtp().config().serialize();
+	{
+		FileWriteDescriptor file(u"config"_q, _basePath, true);
+		EncryptedDescriptor data(Serialize::bytearraySize(expected));
+		data.stream << expected;
+		file.writeEncrypted(data, _localKey);
+	}
+	auto file = FileReadDescriptor();
+	if (!ReadEncryptedFile(file, u"config"_q, _basePath, _localKey)) return false;
+	auto actual = QByteArray();
+	file.stream >> actual;
+	return file.stream.status() == QDataStream::Ok && file.stream.atEnd() && actual == expected;
 }
 
 std::unique_ptr<MTP::Config> Account::readMtpConfig() {
@@ -1284,6 +1381,9 @@ void Account::unregisterDraftSource(
 }
 
 void Account::writeDrafts(not_null<History*> history) {
+	if (history->privateDraftsActive()) {
+		return;
+	}
 	const auto peerId = history->peer->id;
 	const auto &map = history->draftsMap();
 	const auto supportMode = history->session().supportMode();
@@ -1383,6 +1483,9 @@ void Account::writeDrafts(not_null<History*> history) {
 }
 
 void Account::writeDraftCursors(not_null<History*> history) {
+	if (history->privateDraftsActive()) {
+		return;
+	}
 	const auto peerId = history->peer->id;
 	const auto &map = history->draftsMap();
 	const auto supportMode = history->session().supportMode();
@@ -2932,6 +3035,10 @@ void Account::saveRecentSentHashtags(const QString &text) {
 }
 
 void Account::saveRecentSearchHashtags(const QString &text) {
+	// Searches made in private space must not seed public hashtag suggestions.
+	if (_owner->session().leemen().active()) {
+		return;
+	}
 	const auto result = saveRecentHashtags(
 		[] { return cRecentSearchHashtags(); },
 		text);

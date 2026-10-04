@@ -27,6 +27,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "main/main_session.h"
 #include "main/main_domain.h"
 #include "main/main_session_settings.h"
+#include "leemen/leemen_private_accounts.h"
 
 namespace Main {
 namespace {
@@ -46,6 +47,7 @@ constexpr auto kWideIdsTag = ~uint64(0);
 
 Account::Account(not_null<Domain*> domain, const QString &dataName, int index)
 : _domain(domain)
+, _localIndex(index)
 , _local(std::make_unique<Storage::Account>(
 	this,
 	ComposeDataString(dataName, index))) {
@@ -196,6 +198,7 @@ void Account::createSession(
 	if (!serialized.isEmpty()) {
 		local().readSelf(_session.get(), serialized, streamVersion);
 	}
+	_domain->privateAccounts().completeLogin(this, _session.get());
 	_sessionValue = _session.get();
 
 	Ensures(_session != nullptr);
@@ -552,11 +555,13 @@ void Account::forcedLogOut() {
 }
 
 void Account::loggedOut() {
-	_loggingOut = false;
+	_loggingOut = true;
 	Media::Player::mixer()->stopAndClear();
 	destroySession(DestroyReason::LoggedOut);
 	local().reset();
 	cSetOtherOnline(0);
+	_loggingOut = false;
+	_domain->privateAccounts().loginLoggedOut(this);
 }
 
 void Account::destroyMtpKeys(MTP::AuthKeysList &&keys) {

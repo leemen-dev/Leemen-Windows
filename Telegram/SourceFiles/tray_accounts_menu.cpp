@@ -6,6 +6,7 @@ For license and copyright information please follow this link:
 https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "tray_accounts_menu.h"
+#include "leemen/leemen_private_accounts.h"
 
 #include "base/weak_ptr.h"
 #include "base/qt/qt_key_modifiers.h"
@@ -37,6 +38,7 @@ void SetupChangesSubscription(Fn<void()> callback, rpl::lifetime &lifetime) {
 		callback();
 	}, lifetime);
 	watchAccountSessions();
+	Core::App().domain().privateAccounts().changes() | rpl::on_next(callback, lifetime);
 }
 
 void Fill(Platform::Tray &tray) {
@@ -45,7 +47,8 @@ void Fill(Platform::Tray &tray) {
 	}
 	auto accounts = std::vector<not_null<Main::Account*>>();
 	for (const auto &account : Core::App().domain().orderedAccounts()) {
-		if (account->sessionExists()) {
+		if (account->sessionExists()
+			&& !Core::App().domain().privateAccounts().hidden(account)) {
 			accounts.push_back(account);
 		}
 	}

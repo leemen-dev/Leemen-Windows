@@ -596,6 +596,16 @@ void Controller::minimize() {
 	}
 }
 
+void Controller::hide() {
+	hideZoomDropdown();
+	if (_menu) {
+		_menu->hide();
+	}
+	if (_window) {
+		_window->hide();
+	}
+}
+
 void Controller::close() {
 	_events.fire({ Event::Type::Close });
 }

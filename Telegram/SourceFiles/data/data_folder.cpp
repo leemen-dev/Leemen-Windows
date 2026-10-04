@@ -384,7 +384,7 @@ Dialogs::UnreadState Folder::chatListUnreadState() const {
 
 Dialogs::BadgesState Folder::chatListBadgesState() const {
 	auto result = Dialogs::BadgesForUnread(
-		chatListUnreadState(),
+		_chatsList.visibleUnreadState(),
 		Dialogs::CountInBadge::Chats,
 		Dialogs::IncludeInBadge::All);
 	result.unreadMuted

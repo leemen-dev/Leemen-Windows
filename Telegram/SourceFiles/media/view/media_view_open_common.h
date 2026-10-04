@@ -9,6 +9,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 
 #include "data/data_cloud_themes.h"
 #include "data/data_stories.h"
+#include "leemen/public_media_policy.h"
 
 class DocumentData;
 class PeerData;
@@ -155,6 +156,12 @@ public:
 	[[nodiscard]] bool showDrawButton() const {
 		return _showDrawButton;
 	}
+	void setPublicMessage() {
+		_publicMessage = true;
+	}
+	[[nodiscard]] bool publicMessage() const {
+		return _publicMessage;
+	}
 
 private:
 	Window::SessionController *_controller = nullptr;
@@ -170,6 +177,7 @@ private:
 	bool _continueStreaming = false;
 	crl::time _startTime = 0;
 	bool _showDrawButton = false;
+	bool _publicMessage = false;
 
 	std::shared_ptr<Data::GroupCall> _call;
 	QString _callLinkSlug;
@@ -178,6 +186,16 @@ private:
 };
 
 [[nodiscard]] TimeId ExtractVideoTimestamp(not_null<HistoryItem*> item);
+
+[[nodiscard]] Leemen::PublicMediaSelection PublicMessageMediaSelection(
+	not_null<HistoryItem*> item,
+	PhotoData *photo,
+	DocumentData *document,
+	std::uint64_t request = 0);
+[[nodiscard]] bool PublicMessageMediaAllowed(
+	not_null<HistoryItem*> item,
+	PhotoData *photo,
+	DocumentData *document);
 
 [[nodiscard]] TextWithEntities StripQuoteEntities(TextWithEntities text);
 

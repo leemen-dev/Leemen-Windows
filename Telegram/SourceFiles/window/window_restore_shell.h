@@ -24,6 +24,7 @@ public:
 	~RestoreShell();
 
 	void showUnavailable();
+	void hide();
 	void close();
 	void activate();
 	[[nodiscard]] bool isActiveWindow() const;

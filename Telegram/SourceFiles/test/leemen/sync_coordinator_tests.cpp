@@ -1,0 +1,365 @@
+#include "leemen/sync_coordinator.h"
+#include "leemen/private_message_policy.h"
+
+#include <cstdlib>
+#include <iostream>
+#include <utility>
+
+namespace {
+
+using namespace Leemen::Sync;
+auto Checks = 0;
+
+void Check(bool condition, const char *name) {
+	++Checks;
+	if (!condition) {
+		std::cerr << "FAIL: " << name << '\n';
+		std::exit(EXIT_FAILURE);
+	}
+}
+
+RemoteRead Absent() {
+	return { RemoteReadStatus::Absent, 0, {} };
+}
+
+RemoteRead Present(const FilterBlob &blob, std::int64_t version = 1) {
+	return { RemoteReadStatus::Present, version, *EncodeFilterBlob(blob) };
+}
+
+RemoteRead Present(const ContentBlob &blob, std::int64_t version = 1) {
+	return { RemoteReadStatus::Present, version, *EncodeContentBlob(blob) };
+}
+
+SyncCoordinator EmptyReady() {
+	auto sync = SyncCoordinator();
+	const auto requests = sync.pull();
+	Check(requests.size() == 2, "pull both halves");
+	Check(!sync.projection(), "pair gate closed before either read");
+	Check(sync.acceptRead(requests[1].id, Absent()).empty(), "content first waits");
+	Check(!sync.projection(), "one half cannot open gate");
+	Check(sync.acceptRead(requests[0].id, Absent()).empty(), "empty pair needs no writes");
+	Check(sync.projection() && sync.phase() == SyncPhase::Ready, "confirmed absent ready");
+	return sync;
+}
+
+std::vector<SyncRequest> SubmitHide(SyncCoordinator &sync) {
+	auto filter = sync.projection()->filter;
+	auto content = sync.projection()->content;
+	const auto clock = *NextLamport(filter, content);
+	filter.hiddenChatIds["42"] = Register{ "present", clock, "windows", {} };
+	return sync.submit(std::move(filter), std::move(content));
+}
+
+void FailureAndEpochs() {
+	auto sync = EmptyReady();
+	const auto reads = sync.pull();
+	Check(sync.acceptRead(reads[0].id, {}).empty(), "failed fetch emits no PUT");
+	Check(sync.phase() == SyncPhase::Blocked && !sync.projection(), "failed pair fails closed");
+	Check(sync.acceptRead(reads[1].id, Absent()).empty(), "late half ignored");
+	Check(!sync.projection(), "late half never reopens gate");
+	const auto next = sync.pull();
+	Check(next.front().id > reads.back().id, "monotonic request generations");
+	sync.close();
+	Check(sync.acceptRead(next[0].id, Absent()).empty(), "logged-out callback ignored");
+	Check(sync.phase() == SyncPhase::Closed, "logout remains closed");
+	const auto third = sync.pull();
+	Check(third.front().id > next.back().id, "relogin does not reuse callback ids");
+	Check(sync.acceptRead(third[0].id, { RemoteReadStatus::Absent, 4, {} }).empty(), "inconsistent absent rejected");
+	Check(sync.failure() == SyncFailure::InvalidData, "invalid absence distinct from network");
+}
+
+void OrderedWritesAndConflict() {
+	auto sync = EmptyReady();
+	auto reads = SubmitHide(sync);
+	Check(reads.size() == 2 && !sync.projection(), "mutation revalidates before writing");
+	Check(sync.pendingMutation(), "mutation retained before network");
+	Check(sync.acceptRead(reads[0].id, Absent()).empty(), "mutation requires full pair");
+	auto writes = sync.acceptRead(reads[1].id, Absent());
+	Check(writes.size() == 1 && writes[0].kind == BlobKind::Content, "addition content first");
+	const auto oldWrite = writes[0].id;
+	reads = sync.acceptWrite(oldWrite, RemoteWriteStatus::Conflict, 400);
+	Check(reads.size() == 2, "CAS conflict rereads both halves");
+	Check(sync.acceptWrite(oldWrite, RemoteWriteStatus::Accepted, 1).empty(), "duplicate stale PUT reply ignored");
+	auto remoteContent = ContentBlob();
+	remoteContent.lamport = 2;
+	remoteContent.privateSearchDialogIds["43"] = Register{ "present", 2, "android", {} };
+	Check(sync.acceptRead(reads[0].id, Absent()).empty(), "conflict filter waits");
+	writes = sync.acceptRead(reads[1].id, Present(remoteContent, 12));
+	Check(writes.size() == 1 && writes[0].kind == BlobKind::Filter, "unchanged merged content is not overwritten");
+	Check(writes[0].previousVersion == 0, "uses actual read version not conflict hint");
+	Check(sync.acceptWrite(writes[0].id, RemoteWriteStatus::Accepted, 1).empty(), "last write completes");
+	Check(sync.projection() && !sync.pendingMutation(), "projection published after ordered writes");
+	Check(sync.projection()->content.privateSearchDialogIds.contains("43"), "concurrent Android value retained");
+	Check(sync.projection()->contentVersion == 12, "untouched half version retained");
+}
+
+void RemovalAndFailedSecondWrite() {
+	auto sync = EmptyReady();
+	auto reads = SubmitHide(sync);
+	(void)sync.acceptRead(reads[0].id, Absent());
+	auto writes = sync.acceptRead(reads[1].id, Absent());
+	writes = sync.acceptWrite(writes[0].id, RemoteWriteStatus::Accepted, 1);
+	Check(writes.size() == 1 && writes[0].kind == BlobKind::Filter, "content commit precedes membership");
+	(void)sync.acceptWrite(writes[0].id, RemoteWriteStatus::Accepted, 1);
+	auto before = *sync.projection();
+	auto filter = before.filter;
+	auto content = before.content;
+	const auto clock = *NextLamport(filter, content);
+	filter.hiddenChatIds["42"] = Register{ "removed", clock, "windows", {} };
+	content.perChat["42"].clearedAtClock = clock;
+	reads = sync.submit(std::move(filter), std::move(content));
+	(void)sync.acceptRead(reads[0].id, Present(before.filter));
+	writes = sync.acceptRead(reads[1].id, Present(before.content));
+	Check(writes.size() == 1 && writes[0].kind == BlobKind::Filter, "removal filter first");
+	writes = sync.acceptWrite(writes[0].id, RemoteWriteStatus::Accepted, 2);
+	Check(writes.size() == 1 && writes[0].kind == BlobKind::Content, "removal content second");
+	(void)sync.acceptWrite(writes[0].id, RemoteWriteStatus::Failed);
+	Check(!sync.projection() && sync.pendingMutation(), "partial transaction fails closed and retains mutation");
+	Check(sync.pull().size() == 2, "failed transaction retries only after re-read");
+}
+
+void CorruptConflictAndAuthorization() {
+	for (const auto plaintext : { "broken", "{\"schema_version\":3}" }) {
+		auto sync = EmptyReady();
+		auto reads = SubmitHide(sync);
+		(void)sync.acceptRead(reads[0].id, Absent());
+		const auto writes = sync.acceptRead(reads[1].id, Absent());
+		reads = sync.acceptWrite(writes[0].id, RemoteWriteStatus::Conflict);
+		(void)sync.acceptRead(reads[0].id, Absent());
+		Check(sync.acceptRead(reads[1].id, { RemoteReadStatus::Present, 5, plaintext }).empty(), "undecodable conflict never yields PUT");
+		Check(sync.phase() == SyncPhase::Blocked && sync.pendingMutation(), "unknown remote retains pending local data");
+	}
+	auto sync = EmptyReady();
+	const auto reads = SubmitHide(sync);
+	(void)sync.acceptRead(reads[0].id, Absent());
+	auto changed = ContentBlob();
+	changed.pin = PinRegister();
+	changed.pin->state = "none";
+	changed.pin->clock = 8;
+	changed.pin->device = "android";
+	Check(sync.acceptRead(reads[1].id, Present(changed)).empty(), "PIN epoch change rejects old authorization");
+	Check(sync.failure() == SyncFailure::AuthorizationChanged, "PIN change explicit failure");
+	Check(sync.pull().empty(), "automatic retry cannot reuse invalidated authorization");
+	sync.discardPendingMutation();
+	Check(sync.pull().size() == 2, "explicitly discard mutation permits fresh reconciliation");
+}
+
+void ConflictBudgetAndBadAcknowledgement() {
+	auto sync = EmptyReady();
+	auto reads = SubmitHide(sync);
+	for (auto attempt = 0; attempt != 4; ++attempt) {
+		(void)sync.acceptRead(reads[0].id, Absent());
+		const auto writes = sync.acceptRead(reads[1].id, Absent());
+		Check(writes.size() == 1, "bounded conflict retry produces one PUT");
+		reads = sync.acceptWrite(writes[0].id, RemoteWriteStatus::Conflict);
+	}
+	Check(reads.empty() && sync.failure() == SyncFailure::ConflictLimit, "conflicts terminate after budget");
+	Check(sync.pendingMutation() && !sync.projection(), "conflict exhaustion preserves dirty state and privacy");
+	sync = EmptyReady();
+	reads = SubmitHide(sync);
+	(void)sync.acceptRead(reads[0].id, Absent());
+	const auto writes = sync.acceptRead(reads[1].id, Absent());
+	Check(sync.acceptWrite(writes[0].id, RemoteWriteStatus::Accepted, 9).empty(), "bad acknowledged version never advances next half");
+	Check(sync.failure() == SyncFailure::InvalidData, "nonconsecutive version rejected");
+}
+
+void CrashRecovery() {
+	auto original = EmptyReady();
+	const auto stale = SubmitHide(original);
+	const auto checkpoint = original.checkpoint();
+	auto restarted = SyncCoordinator();
+	Check(restarted.restoreCheckpoint(checkpoint), "restore pending journal");
+	Check(!restarted.projection(), "journal is never a trusted remote projection");
+	Check(restarted.pendingMutation(), "restart preserves user mutation");
+	auto reads = restarted.pull();
+	(void)restarted.acceptRead(reads[0].id, Absent());
+	auto writes = restarted.acceptRead(reads[1].id, Absent());
+	Check(writes.size() == 1 && writes[0].previousVersion == 0, "restored journal revalidates server");
+	Check(original.restoreCheckpoint(checkpoint), "restore replaces live coordinator state");
+	Check(original.acceptRead(stale[0].id, Absent()).empty(), "restore invalidates previous callbacks");
+	auto broken = checkpoint;
+	broken.pending->filterVersion = -1;
+	Check(!restarted.restoreCheckpoint(std::move(broken)), "reject corrupt journal version");
+	Check(!restarted.projection() && !restarted.pendingMutation(), "invalid journal leaves closed gate");
+}
+
+void RemoteResetCannotResurrectState() {
+	auto sync = SyncCoordinator();
+	auto reads = sync.pull();
+	(void)sync.acceptRead(reads[0].id, Present(FilterBlob(), 4));
+	(void)sync.acceptRead(reads[1].id, Present(ContentBlob(), 7));
+	Check(sync.projection(), "established server versions trusted");
+	reads = SubmitHide(sync);
+	const auto saved = sync.checkpoint();
+	(void)sync.acceptRead(reads[0].id, Absent());
+	Check(sync.acceptRead(reads[1].id, Absent()).empty(), "server reset emits no resurrection PUT");
+	Check(sync.failure() == SyncFailure::InvalidData && sync.pendingMutation(), "reset preserves journal behind closed gate");
+	auto restarted = SyncCoordinator();
+	Check(restarted.restoreCheckpoint(saved), "restore reset-race journal");
+	reads = restarted.pull();
+	(void)restarted.acceptRead(reads[0].id, Present(FilterBlob(), 3));
+	Check(restarted.acceptRead(reads[1].id, Present(ContentBlob(), 7)).empty(), "nonzero version regression also rejected");
+	Check(restarted.failure() == SyncFailure::InvalidData, "persisted version floor survives restart");
+	auto ownWrite = EmptyReady();
+	reads = SubmitHide(ownWrite);
+	(void)ownWrite.acceptRead(reads[0].id, Absent());
+	auto writes = ownWrite.acceptRead(reads[1].id, Absent());
+	writes = ownWrite.acceptWrite(writes[0].id, RemoteWriteStatus::Accepted, 1);
+	Check(ownWrite.checkpoint().pending->contentVersion == 1, "own partial commit raises journal floor");
+	reads = ownWrite.acceptWrite(writes[0].id, RemoteWriteStatus::Conflict);
+	(void)ownWrite.acceptRead(reads[0].id, Absent());
+	(void)ownWrite.acceptRead(reads[1].id, Absent());
+	Check(ownWrite.failure() == SyncFailure::InvalidData, "reset after own partial commit stays closed");
+}
+
+void NonVisibilityMutations() {
+	auto trusted = SyncPair();
+	trusted.filter.hiddenChatIds["42"] = { "present", 1, "android", {} };
+	trusted.content.perChat["42"].messageState["5"] = { "hidden", 1, "android", {} };
+	auto pending = trusted;
+	pending.filter.lamport = pending.content.lamport = 2;
+	pending.content.privateSearchDialogIds["42"] = { "present", 2, "windows", {} };
+	Check(CanRetainTrustedProjection(trusted, pending), "private search sync keeps view open");
+	pending.content.settings.pinTimeoutMinutes = IntRegister{ 5, 2, "windows", {} };
+	Check(CanRetainTrustedProjection(trusted, pending), "timeout sync keeps current view");
+	pending.content.perChat["43"].selfPinned["2"] = { "present", 2, "windows", {} };
+	Check(CanRetainTrustedProjection(trusted, pending), "self-pin-only chat does not close view");
+	auto unsafe = pending;
+	unsafe.filter.hiddenChatIds["43"] = { "present", 2, "windows", {} };
+	Check(!CanRetainTrustedProjection(trusted, unsafe), "new membership closes projection");
+	unsafe = pending;
+	unsafe.filter.chatsOffModeVisible.push_back("42");
+	Check(!CanRetainTrustedProjection(trusted, unsafe), "OFF visibility change closes projection");
+	unsafe = pending;
+	unsafe.content.perChat["42"].messageState["5"] = { "exposed", 2, "windows", {} };
+	Check(!CanRetainTrustedProjection(trusted, unsafe), "message visibility change closes projection");
+	unsafe = pending;
+	unsafe.content.perChat["43"].clearedAtClock = 2;
+	Check(!CanRetainTrustedProjection(trusted, unsafe), "clear barrier closes projection");
+	unsafe = pending;
+	unsafe.content.pin = PinRegister();
+	Check(!CanRetainTrustedProjection(trusted, unsafe), "PIN epoch closes projection");
+	unsafe = pending;
+	unsafe.content.settings.allowScreenshots = BoolRegister{ false, 2, "windows", {} };
+	Check(!CanRetainTrustedProjection(trusted, unsafe), "capture setting closes projection");
+	unsafe = pending;
+	unsafe.content.unknownFields["future_visibility"].value = true;
+	Check(!CanRetainTrustedProjection(trusted, unsafe), "future semantics close projection");
+	unsafe = pending;
+	unsafe.content.perChat["43"].unknownFields["future"].value = true;
+	Check(!CanRetainTrustedProjection(trusted, unsafe), "future per-chat semantics retained in comparison");
+}
+
+void OfflineConfirmedBaseline() {
+	auto sync = EmptyReady();
+	Check(sync.cachedProjection() && sync.projection(), "complete remote read establishes a confirmed baseline");
+	auto restarted = SyncCoordinator();
+	Check(restarted.restoreCheckpoint(sync.checkpoint()), "confirmed empty baseline survives restart");
+	Check(restarted.cachedProjection() && !restarted.projection(), "cached membership grants no fresh pair authority");
+	Check(restarted.submit(FilterBlob(), ContentBlob()).empty(), "cache alone cannot submit stale writes");
+	auto reads = restarted.pull();
+	Check(restarted.acceptRead(reads[0].id, { RemoteReadStatus::Failed, 0, {} }).empty(),
+		"offline refresh emits no writes");
+	Check(restarted.failure() == SyncFailure::Transport && restarted.cachedProjection(),
+		"network outage preserves confirmed ordinary-chat membership");
+	reads = restarted.pull();
+	Check(restarted.acceptRead(reads[0].id, Present(FilterBlob(), 1)).empty(), "first refreshed half is not a new baseline");
+	Check(restarted.cachedProjection()->filterVersion == 0, "partial read preserves previous full pair");
+	Check(restarted.acceptRead(reads[1].id, { RemoteReadStatus::Present, 1, "{}" }).empty(),
+		"malformed fresh content never restores remote authority");
+	Check(!restarted.cachedProjection() && !restarted.checkpoint().confirmed,
+		"malformed remote pair durably invalidates offline fallback");
+	reads = SubmitHide(sync);
+	Check(!sync.cachedProjection(), "pending membership change closes cached fallback");
+	Check(sync.acceptRead(reads[0].id, Absent()).empty(), "membership write validates current filter");
+	auto writes = sync.acceptRead(reads[1].id, Absent());
+	writes = sync.acceptWrite(writes[0].id, RemoteWriteStatus::Accepted, 1);
+	Check(writes.size() == 1 && !sync.cachedProjection(), "partially acknowledged hide does not trust old membership");
+	Check(sync.checkpoint().confirmed && sync.checkpoint().confirmed->contentVersion == 0
+		&& sync.checkpoint().contentVersionFloor == 1, "partial commit keeps baseline distinct from durable floors");
+	Check(sync.acceptWrite(writes[0].id, RemoteWriteStatus::Accepted, 1).empty(), "full acknowledgement completes hide");
+	Check(sync.cachedProjection() && sync.cachedProjection()->filter.hiddenChatIds.contains("42"),
+		"fully acknowledged write replaces confirmed baseline");
+	Check(restarted.restoreCheckpoint(sync.checkpoint()), "nonempty confirmed pair restores closed");
+	auto filter = sync.projection()->filter;
+	auto content = sync.projection()->content;
+	Check(NextLamport(filter, content).has_value(), "harmless search mutation has a new clock");
+	content.privateSearchDialogIds["42"] = { "present", content.lamport, "windows", {} };
+	Check(!sync.submit(filter, content).empty(), "harmless search mutation starts reconciliation");
+	Check(sync.cachedProjection(), "nonvisibility pending mutation retains membership cache");
+	Check(restarted.restoreCheckpoint(sync.checkpoint()) && restarted.cachedProjection(),
+		"harmless pending mutation retains cached fallback after restart");
+	sync.discardPendingMutation();
+	Check(!sync.cachedProjection() && !sync.checkpoint().confirmed, "discarding an uncertain queue requires a fresh baseline");
+	restarted.discardCachedProjection();
+	Check(!restarted.cachedProjection() && restarted.pendingMutation(), "hard runtime invalidation clears cache without discarding user intent");
+	auto corrupt = restarted.checkpoint();
+	corrupt.confirmed = SyncPair();
+	corrupt.confirmed->filterVersion = corrupt.filterVersionFloor + 1;
+	Check(!restarted.restoreCheckpoint(corrupt) && !restarted.cachedProjection(),
+		"baseline ahead of observed version floors is rejected");
+	sync.close();
+	Check(!sync.cachedProjection() && !sync.checkpoint().confirmed, "confirmed reset cleanup wipes baseline");
+}
+
+void OfflineRecentSearchBaseline() {
+	auto sync = EmptyReady();
+	auto filter = sync.projection()->filter;
+	auto content = sync.projection()->content;
+	const auto clock = *NextLamport(filter, content);
+	content.privateSearchDialogIds["43"] = { "present", clock, "windows", {} };
+	const auto reads = sync.submit(filter, content);
+	Check(reads.size() == 2, "private search is submitted to both-half reconciliation");
+	Check(sync.acceptRead(reads[0].id, Absent()).empty(), "private search preflight waits for content");
+	auto writes = sync.acceptRead(reads[1].id, Absent());
+	Check(!writes.empty(), "private search produces a remote write");
+	while (!writes.empty()) {
+		Check(writes.size() == 1, "private search acknowledgement stays ordered");
+		writes = sync.acceptWrite(writes[0].id, RemoteWriteStatus::Accepted,
+			writes[0].previousVersion + 1);
+	}
+	Check(sync.projection() && !sync.pendingMutation(), "private search acknowledgement clears local sync intent");
+	Check(!sync.projection()->filter.hiddenChatIds.contains("43"), "private search fixture is an ordinary chat");
+	Check(Leemen::PrivateSearchOnly(&sync.projection()->content, 43), "fresh pair contains acknowledged private search");
+	auto restarted = SyncCoordinator();
+	Check(restarted.restoreCheckpoint(sync.checkpoint()), "acknowledged private search baseline restores");
+	Check(!restarted.projection() && restarted.cachedProjection(), "restored private search grants no fresh pair");
+	Check(Leemen::PrivateSearchOnly(&restarted.cachedProjection()->content, 43),
+		"ordinary chat searched in Private Space remains absent from offline recents after restart");
+	const auto offline = restarted.pull();
+	Check(restarted.acceptRead(offline[0].id, { RemoteReadStatus::Failed, 0, {} }).empty(),
+		"failed recent-search refresh emits no PUT");
+	Check(restarted.cachedProjection() && Leemen::PrivateSearchOnly(&restarted.cachedProjection()->content, 43),
+		"failed network refresh keeps the confirmed recent-search deny record");
+	for (const auto plaintext : { "broken", "{\"schema_version\":3}" }) {
+		auto invalid = SyncCoordinator();
+		Check(invalid.restoreCheckpoint(sync.checkpoint()), "private search cache restores before invalid remote read");
+		const auto requests = invalid.pull();
+		Check(invalid.acceptRead(requests[0].id, Present(sync.projection()->filter)).empty(),
+			"recent-search refresh waits for complete content before PUT");
+		Check(invalid.acceptRead(requests[1].id, { RemoteReadStatus::Present, 1, plaintext }).empty(),
+			"corrupt or unsupported recent-search refresh emits no PUT");
+		Check(!invalid.cachedProjection() && !invalid.projection(),
+			"corrupt or unsupported remote pair closes cached recent-search source and ordinary-chat grants");
+	}
+	restarted.discardCachedProjection();
+	Check(!restarted.cachedProjection(), "hard key or generation invalidation revokes recent-search baseline");
+	sync.close();
+	Check(!sync.cachedProjection() && !sync.projection(), "logout erases recent-search projection authority");
+}
+
+} // namespace
+
+int main() {
+	FailureAndEpochs();
+	OrderedWritesAndConflict();
+	RemovalAndFailedSecondWrite();
+	CorruptConflictAndAuthorization();
+	ConflictBudgetAndBadAcknowledgement();
+	CrashRecovery();
+	RemoteResetCannotResurrectState();
+	NonVisibilityMutations();
+	OfflineConfirmedBaseline();
+	OfflineRecentSearchBaseline();
+	std::cout << Checks << " sync coordinator checks passed\n";
+}

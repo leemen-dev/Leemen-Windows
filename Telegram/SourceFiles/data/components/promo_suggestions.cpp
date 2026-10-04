@@ -17,6 +17,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "data/data_session.h"
 #include "data/data_user.h"
 #include "history/history.h"
+#include "leemen/leemen_private_space.h"
 #include "main/main_session.h"
 #include "main/main_session_settings.h"
 
@@ -336,7 +337,11 @@ std::optional<UserIds> PromoSuggestions::knownContactBirthdays() const {
 		|| (_contactBirthdaysLastDayRequest != QDate::currentDate().day())) {
 		return std::nullopt;
 	}
-	return _contactBirthdays;
+	auto result = UserIds();
+	for (const auto id : _contactBirthdays) {
+		if (_session->leemen().allowsPeer(peerFromUser(id))) result.push_back(id);
+	}
+	return result;
 }
 
 std::optional<UserIds> PromoSuggestions::knownBirthdaysToday() const {
@@ -344,7 +349,11 @@ std::optional<UserIds> PromoSuggestions::knownBirthdaysToday() const {
 		|| (_contactBirthdaysLastDayRequest != QDate::currentDate().day())) {
 		return std::nullopt;
 	}
-	return _contactBirthdaysToday;
+	auto result = UserIds();
+	for (const auto id : _contactBirthdaysToday) {
+		if (_session->leemen().allowsPeer(peerFromUser(id))) result.push_back(id);
+	}
+	return result;
 }
 
 QString PromoSuggestions::SugValidatePassword() {

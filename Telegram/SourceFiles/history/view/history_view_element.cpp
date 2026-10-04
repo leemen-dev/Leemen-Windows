@@ -1537,7 +1537,7 @@ bool Element::isHiddenByGroup() const {
 }
 
 bool Element::isHidden() const {
-	return isHiddenByGroup();
+	return isHiddenByGroup() || data()->isHiddenSavedMessage();
 }
 
 void Element::overrideMedia(std::unique_ptr<Media> media) {

@@ -52,6 +52,9 @@ void Submit(
 		error->show();
 	};
 	switch (TryPasscode(field->text())) {
+	case PasscodeAttempt::CorruptPrivateAccounts:
+		fail(tr::lng_leemen_accounts_damaged(tr::now));
+		return;
 	case PasscodeAttempt::Empty:
 		field->showError();
 		return;

@@ -69,6 +69,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "info/peer_gifts/info_peer_gifts_common.h"
 #include "info/profile/info_profile_icon.h"
 #include "lang/lang_keys.h"
+#include "leemen/leemen_private_space.h"
 #include "lottie/lottie_common.h"
 #include "lottie/lottie_single_player.h"
 #include "main/main_app_config.h"
@@ -2453,6 +2454,7 @@ std::vector<not_null<UserData*>> CollectGiftFrequentUsers(
 	for (const auto &peer : session->topPeers().list()) {
 		const auto user = peer->asUser();
 		if (!user
+			|| !session->leemen().allowsPeer(peer->id)
 			|| user->isSelf()
 			|| user->isBot()
 			|| user->isServiceUser()
@@ -2470,10 +2472,12 @@ std::vector<not_null<UserData*>> CollectGiftFrequentUsers(
 void ChooseStarGiftRecipient(
 		not_null<Window::SessionController*> window) {
 	const auto session = &window->session();
-	session->promoSuggestions().requestContactBirthdays([=] {
+	session->promoSuggestions().requestContactBirthdays(crl::guard(window, [=] {
+		if (!session->leemen().allowsPeer(session->userPeerId())) return;
 		auto controller = std::make_unique<Controller>(
 			session,
 			[=](not_null<PeerData*> peer, PickType type) {
+				if (!session->leemen().allowsPeer(peer->id)) return;
 				if (type == PickType::Activate) {
 					ShowStarGiftBox(window, peer);
 				} else if (type == PickType::SendMessage) {
@@ -2495,13 +2499,14 @@ void ChooseStarGiftRecipient(
 		window->show(
 			Box<PeerListBox>(std::move(controller), std::move(initBox)),
 			LayerOption::KeepOther);
-	});
+	}));
 }
 
 void ShowStarGiftBox(
 		not_null<Window::SessionController*> controller,
 		not_null<PeerData*> peer) {
-	if (controller->showFrozenError()) {
+	if (!controller->session().leemen().allowsPeer(peer->id)
+		|| controller->showFrozenError()) {
 		return;
 	}
 
@@ -2547,6 +2552,7 @@ void ShowStarGiftBox(
 		}
 		auto was = std::move(entry);
 		entry = Session();
+		if (!session->leemen().allowsPeer(peer->id)) return;
 		if (const auto strong = weak.get()) {
 			if (const auto user = peer->asUser(); user && !user->isSelf()) {
 				using Type = Api::DisallowedGiftType;

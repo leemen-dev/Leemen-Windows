@@ -20,6 +20,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "calls/calls_instance.h"
 #include "core/application.h"
 #include "core/click_handler_types.h"
+#include "core/core_screenshot_protection.h"
 #include "core/file_utilities.h"
 #include "core/mime_type.h"
 #include "core/ui_integration.h"
@@ -102,6 +103,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "main/main_account.h"
 #include "main/main_domain.h" // Domain::activeSessionValue.
 #include "main/main_session.h"
+#include "leemen/leemen_private_space.h"
 #include "main/main_session_settings.h"
 #include "layout/layout_document_generic_preview.h"
 #include "platform/platform_overlay_widget.h"
@@ -983,6 +985,10 @@ OverlayWidget::OverlayWidget()
 	_dropdownShowTimer.setCallback([=] { showDropdown(); });
 
 	orderWidgets();
+	Core::App().screenshotProtection().activeValue(
+	) | rpl::on_next([=] {
+		refreshScreenshotProtection();
+	}, _screenshotProtectionLifetime);
 }
 
 void OverlayWidget::showSaveMsgToast(const QString &path, auto phrase) {
@@ -1579,7 +1585,7 @@ void OverlayWidget::documentUpdated(not_null<DocumentData*> document) {
 		return;
 	} else if (documentBubbleShown()) {
 		if (_message
-			&& _message->forbidsSaving()
+			&& (publicMediaScoped() || _message->forbidsSaving())
 			&& _documentMedia->loaded(true)) {
 			redisplayContent();
 		} else if ((_document->loading() && _docCancel->isHidden())
@@ -1630,7 +1636,9 @@ void OverlayWidget::updateDocSize() {
 }
 
 void OverlayWidget::refreshNavVisibility() {
-	if (_stories) {
+	if (publicMediaScoped()) {
+		_leftNavVisible = _rightNavVisible = false;
+	} else if (_stories) {
 		_leftNavVisible = _stories->subjumpAvailable(-1);
 		_rightNavVisible = _stories->subjumpAvailable(1);
 	} else if (_instantViewMediaData) {
@@ -1653,7 +1661,7 @@ void OverlayWidget::refreshNavVisibility() {
 }
 
 bool OverlayWidget::computeSaveButtonVisible() const {
-	if (hasCopyMediaRestriction(true)) {
+	if (publicMediaScoped() || hasCopyMediaRestriction(true)) {
 		return false;
 	} else if (_photo) {
 		return _photo->hasVideo() || _photoMedia->loaded();
@@ -1705,6 +1713,10 @@ void OverlayWidget::showPremiumDownloadPromo() {
 }
 
 void OverlayWidget::updateControls() {
+	if (publicMediaScoped() && !publicMediaAllowed()) {
+		close();
+		return;
+	}
 	if (_document && documentBubbleShown()) {
 		_docRect = QRect(
 			(width() - st::mediaviewFileSize.width()) / 2,
@@ -1716,7 +1728,11 @@ void OverlayWidget::updateControls() {
 			_docRect.y() + st::mediaviewFilePadding,
 			st::mediaviewFileIconSize,
 			st::mediaviewFileIconSize);
-		if (_document->loading()) {
+		if (publicMediaScoped()) {
+			_docDownload->hide();
+			_docSaveAs->hide();
+			_docCancel->hide();
+		} else if (_document->loading()) {
 			_docDownload->hide();
 			_docSaveAs->hide();
 			_docCancel->moveToLeft(_docRect.x() + 2 * st::mediaviewFilePadding + st::mediaviewFileIconSize, _docRect.y() + st::mediaviewFilePadding + st::mediaviewFileLinksTop);
@@ -1880,6 +1896,17 @@ void OverlayWidget::updateControls() {
 			st::mediaviewFont->height);
 	}
 	updateHeader();
+	if (publicMediaScoped()) {
+		_docDownload->hide();
+		_docSaveAs->hide();
+		_docCancel->hide();
+		_nameNav = _separatorNav = _dateNav = _headerNav = QRect();
+		_headerHasLink = _saveVisible = _shareVisible = false;
+		_drawVisible = _recognizeVisible = false;
+		_from = nullptr;
+		_fromName.clear();
+		_headerText.clear();
+	}
 	refreshNavVisibility();
 	resizeCenteredControls();
 
@@ -2213,6 +2240,10 @@ void OverlayWidget::refreshPollVotersWidgetGeometry() {
 
 void OverlayWidget::fillContextMenuActions(
 		const Ui::Menu::MenuCallback &addAction) {
+	if (publicMediaScoped()) {
+		addAction(tr::lng_close(tr::now), [=] { close(); }, nullptr);
+		return;
+	}
 	if (_message && _message->isSponsored()) {
 		if (const auto window = findWindow()) {
 			const auto show = window->uiShow();
@@ -3009,9 +3040,11 @@ void OverlayWidget::clearSession() {
 	_instantViewMediaData = std::nullopt;
 	_collage = nullptr;
 	_session = nullptr;
+	_publicMediaScope = {};
 }
 
 OverlayWidget::~OverlayWidget() {
+	_screenshotProtectionLifetime.destroy();
 	clearSession();
 
 	// Otherwise dropdownHidden() may be called from the destructor.
@@ -3135,7 +3168,12 @@ void OverlayWidget::showSaveMsgFile() {
 }
 
 void OverlayWidget::close() {
+	if (_clearingBeforeHide) return;
 	if (isHidden()) {
+		if (publicMediaScoped()) {
+			clearBeforeHide();
+			clearAfterHide();
+		}
 		return;
 	}
 	hide();
@@ -3269,6 +3307,7 @@ void OverlayWidget::subscribeToScreenGeometry() {
 }
 
 void OverlayWidget::toMessage() {
+	if (publicMediaScoped()) return;
 	if (const auto item = _message) {
 		close();
 		if (const auto window = findWindow()) {
@@ -3282,6 +3321,8 @@ void OverlayWidget::notifyFileDialogShown(bool shown) {
 }
 
 void OverlayWidget::saveAs() {
+	if (publicMediaScoped()) return;
+	const auto publicScope = _publicMediaScope;
 	if (showCopyMediaRestriction(true)) {
 		return;
 	} else if (hasCopyMediaRestriction()) {
@@ -3318,7 +3359,8 @@ void OverlayWidget::saveAs() {
 				name,
 				true,
 				alreadyDir);
-			if (!file.isEmpty() && file != location.name()) {
+			if (publicMediaAllowed(publicScope)
+				&& !file.isEmpty() && file != location.name()) {
 				if (bytes.isEmpty()) {
 					QFile(file).remove();
 					QFile(location.name()).copy(file);
@@ -3365,7 +3407,7 @@ void OverlayWidget::saveAs() {
 					_photo->date()),
 				crl::guard(_window, [=](const QString &result) {
 					QFile f(result);
-					if (!result.isEmpty()
+					if (publicMediaAllowed(publicScope) && !result.isEmpty()
 						&& _photo == photo
 						&& f.open(QIODevice::WriteOnly)) {
 						f.write(bytes);
@@ -3395,7 +3437,8 @@ void OverlayWidget::saveAs() {
 				false,
 				_photo->date()),
 			crl::guard(_window, [=](const QString &result) {
-				if (!result.isEmpty() && _photo == photo) {
+				if (publicMediaAllowed(publicScope)
+					&& !result.isEmpty() && _photo == photo) {
 					media->saveToFile(result);
 				}
 			}));
@@ -3404,6 +3447,7 @@ void OverlayWidget::saveAs() {
 }
 
 void OverlayWidget::handleDocumentClick() {
+	if (publicMediaScoped()) return;
 	if (_document->loading()) {
 		saveCancel();
 	} else {
@@ -3424,7 +3468,7 @@ void OverlayWidget::handleDocumentClick() {
 
 bool OverlayWidget::canShareAtTime() const {
 	const auto media = _message ? _message->media() : nullptr;
-	return _document
+	return !publicMediaScoped() && _document
 		&& media
 		&& _streamed
 		&& (_document == media->document())
@@ -3450,6 +3494,7 @@ void OverlayWidget::shareAtTime() {
 }
 
 void OverlayWidget::downloadMedia() {
+	if (publicMediaScoped()) return;
 	if (!_photo && !_document) {
 		return;
 	} else if (Core::App().settings().askDownloadPath()) {
@@ -3570,6 +3615,7 @@ void OverlayWidget::saveCancel() {
 }
 
 void OverlayWidget::showInFolder() {
+	if (publicMediaScoped()) return;
 	if (!_document) return;
 
 	auto filepath = _document->filepath(true);
@@ -3582,6 +3628,7 @@ void OverlayWidget::showInFolder() {
 }
 
 void OverlayWidget::forwardMedia() {
+	if (publicMediaScoped()) return;
 	if (!_session) {
 		return;
 	}
@@ -3601,6 +3648,7 @@ void OverlayWidget::forwardMedia() {
 }
 
 void OverlayWidget::deleteMedia() {
+	if (publicMediaScoped()) return;
 	if (_stories) {
 		_stories->deleteRequested();
 		return;
@@ -3658,6 +3706,7 @@ void OverlayWidget::deleteMedia() {
 }
 
 void OverlayWidget::showMediaOverview() {
+	if (publicMediaScoped()) return;
 	if (_menu) {
 		_menu->hideMenu(true);
 	}
@@ -3708,6 +3757,7 @@ void OverlayWidget::recognize() {
 }
 
 void OverlayWidget::draw() {
+	if (publicMediaScoped()) return;
 	if (!_session) {
 		return;
 	}
@@ -3727,6 +3777,7 @@ void OverlayWidget::draw() {
 }
 
 void OverlayWidget::copyMedia() {
+	if (publicMediaScoped()) return;
 	if (showCopyMediaRestriction()) {
 		return;
 	}
@@ -3751,7 +3802,7 @@ void OverlayWidget::copyMedia() {
 }
 
 void OverlayWidget::showAttachedStickers() {
-	if (!_session) {
+	if (publicMediaScoped() || !_session) {
 		return;
 	}
 	const auto &active = _session->windows();
@@ -3812,6 +3863,7 @@ auto OverlayWidget::sharedMediaType() const
 }
 
 auto OverlayWidget::sharedMediaKey() const -> std::optional<SharedMediaKey> {
+	if (publicMediaScoped()) return std::nullopt;
 	if (!_message
 		&& _peer
 		&& !_user
@@ -3964,6 +4016,7 @@ void OverlayWidget::handleSharedMediaUpdate(SharedMediaWithLastSlice &&update) {
 }
 
 std::optional<OverlayWidget::UserPhotosKey> OverlayWidget::userPhotosKey() const {
+	if (publicMediaScoped()) return std::nullopt;
 	if (!_message && _user && _photo) {
 		return UserPhotosKey{ peerToUser(_user->id), _photo->id };
 	}
@@ -4025,6 +4078,7 @@ void OverlayWidget::handleUserPhotosUpdate(UserPhotosSlice &&update) {
 
 auto OverlayWidget::instantViewMediaKey() const
 -> std::optional<InstantViewItem> {
+	if (publicMediaScoped()) return std::nullopt;
 	if (_photo) {
 		return InstantViewItem(_photo);
 	} else if (_document) {
@@ -4071,6 +4125,7 @@ void OverlayWidget::validateInstantViewMedia() {
 }
 
 std::optional<OverlayWidget::CollageKey> OverlayWidget::collageKey() const {
+	if (publicMediaScoped()) return std::nullopt;
 	if (_message) {
 		if (const auto media = _message->media()) {
 			if (const auto page = media->webpage()) {
@@ -4175,7 +4230,10 @@ void OverlayWidget::refreshMediaViewer() {
 }
 
 void OverlayWidget::refreshFromLabel() {
-	if (_message) {
+	if (publicMediaScoped()) {
+		_from = nullptr;
+		_fromName.clear();
+	} else if (_message) {
 		_from = _message->originalSender();
 		if (const auto info = _message->originalHiddenSenderInfo()) {
 			_fromName = info->name;
@@ -4194,6 +4252,19 @@ void OverlayWidget::refreshFromLabel() {
 
 void OverlayWidget::refreshCaption() {
 	_caption = Ui::Text::String();
+	if (publicMediaScoped()) {
+		if (publicMediaAllowed()) {
+			_caption = Ui::Text::String(
+				st::mediaviewCaptionStyle,
+				_message->originalText().text,
+				kPlainTextOptions,
+				st::msgMinWidth);
+		}
+		if (_streamed && _streamed->controls) {
+			_streamed->controls->setTimestamps({});
+		}
+		return;
+	}
 	const auto caption = [&] {
 		if (_stories) {
 			return StripQuoteEntities(_stories->captionText());
@@ -4516,7 +4587,61 @@ void OverlayWidget::activate() {
 }
 
 void OverlayWidget::show(OpenRequest request) {
+	auto publicItem = request.publicMessage() ? request.item() : nullptr;
+	if (request.publicMessage() && (!publicItem
+		|| !PublicMessageMediaAllowed(publicItem, request.photo(), request.document())
+		|| request.story() || request.peer() || request.call())) {
+		return;
+	}
+	const auto publicScope = publicItem
+		? PublicMessageMediaSelection(publicItem, request.photo(), request.document(),
+			++_lastPublicMediaRequest)
+		: Leemen::PublicMediaSelection();
+	const auto publicId = publicItem ? publicItem->fullId() : FullMsgId();
+	const auto publicSession = publicItem
+		? base::make_weak(&publicItem->history()->session())
+		: base::weak_ptr<Main::Session>();
+	const auto publicController = request.publicMessage() && request.controller()
+		? base::make_weak(request.controller())
+		: base::weak_ptr<Window::SessionController>();
+	if (publicItem && !Leemen::AllowsPublicMedia(publicScope, publicScope, true)) return;
+	if (publicItem || publicMediaScoped()) {
+		close();
+		clearBeforeHide();
+		clearAfterHide();
+		_pip = nullptr;
+		_showAsPip = false;
+	}
+	if (publicItem) {
+		if (!publicSession || !publicController
+			|| &publicController->session() != publicSession.get()) return;
+		publicItem = publicSession->data().message(publicId);
+		const auto media = publicItem ? publicItem->media() : nullptr;
+		if (!media || !PublicMessageMediaAllowed(publicItem, media->photo(), media->document())
+			|| !Leemen::AllowsPublicMedia(publicScope,
+				PublicMessageMediaSelection(publicItem, media->photo(), media->document(),
+					publicScope.request), true)) return;
+		request = media->photo()
+			? OpenRequest(publicController.get(), media->photo(), publicItem, MsgId(), PeerId())
+			: OpenRequest(publicController.get(), media->document(), publicItem, MsgId(), PeerId());
+		request.setPublicMessage();
+	}
 	const auto story = request.story();
+	if (story && !story->session().leemen().allowsPeer(story->peer()->id)) {
+		return;
+	}
+	if (const auto peer = request.peer()) {
+		if (!peer->session().leemen().allowsPeer(peer->id)) {
+			return;
+		}
+	}
+	if (const auto item = request.item()) {
+		if ((!publicItem && !item->history()->session().leemen().allowsPeer(
+				item->history()->peer->id))
+			|| item->isHiddenSavedMessage()) {
+			return;
+		}
+	}
 	const auto document = story ? story->document() : request.document();
 	const auto photo = story ? story->photo() : request.photo();
 	const auto call = story ? story->call() : request.call();
@@ -4524,7 +4649,7 @@ void OverlayWidget::show(OpenRequest request) {
 	const auto contextPeer = request.peer();
 	const auto contextTopicRootId = request.topicRootId();
 	const auto contextMonoforumPeerId = request.monoforumPeerId();
-	_drawButtonEnabled = request.showDrawButton();
+	_drawButtonEnabled = !publicItem && request.showDrawButton();
 	if (!request.continueStreaming() && !request.startTime() && !_reShow) {
 		if (_message && (_message == contextItem)) {
 			return close();
@@ -4545,6 +4670,10 @@ void OverlayWidget::show(OpenRequest request) {
 			Ui::LayerOption::CloseOther,
 			anim::type::instant);
 	}
+	if (publicItem && (!publicSession || !publicController
+		|| &publicController->session() != publicSession.get()
+		|| publicSession->data().message(publicId) != publicItem
+		|| !PublicMessageMediaAllowed(publicItem, photo, document))) return;
 	if (photo) {
 		if (contextItem && contextPeer) {
 			return;
@@ -4568,6 +4697,10 @@ void OverlayWidget::show(OpenRequest request) {
 		} else {
 			setContext(v::null);
 		}
+		if (publicItem && (_message != publicItem
+			|| !PublicMessageMediaAllowed(_message, photo, nullptr))) return;
+		_publicMediaScope = publicScope;
+		refreshScreenshotProtection();
 
 		clearControlsState();
 		_firstOpenedPeerPhoto = (contextPeer != nullptr);
@@ -4598,6 +4731,10 @@ void OverlayWidget::show(OpenRequest request) {
 		} else {
 			setContext(v::null);
 		}
+		if (publicItem && (_message != publicItem
+			|| !PublicMessageMediaAllowed(_message, nullptr, document))) return;
+		_publicMediaScope = publicScope;
+		refreshScreenshotProtection();
 
 		clearControlsState();
 
@@ -4620,7 +4757,11 @@ void OverlayWidget::show(OpenRequest request) {
 			activateControls();
 		}
 	}
-	if (const auto controller = request.controller()) {
+	if (publicItem) {
+		if (publicController) {
+			_openedFrom = base::make_weak(&publicController->window());
+		}
+	} else if (const auto controller = request.controller()) {
 		_openedFrom = base::make_weak(&controller->window());
 	}
 }
@@ -4628,6 +4769,7 @@ void OverlayWidget::show(OpenRequest request) {
 void OverlayWidget::displayPhoto(
 		not_null<PhotoData*> photo,
 		anim::activation activation) {
+	const auto publicScope = _publicMediaScope;
 	if (photo->isNull()) {
 		displayDocument(nullptr, activation);
 		return;
@@ -4640,6 +4782,10 @@ void OverlayWidget::displayPhoto(
 	_fullScreenVideo = false;
 	const auto photoChanged = (_photo != photo);
 	assignMediaPointer(photo);
+	if (!publicMediaAllowed(publicScope)) {
+		close();
+		return;
+	}
 	_rotation = _photo->owner().mediaRotation().get(_photo);
 	_radial.stop();
 	if (photoChanged) {
@@ -4653,6 +4799,10 @@ void OverlayWidget::displayPhoto(
 	}
 
 	refreshMediaViewer();
+	if (!publicMediaAllowed(publicScope)) {
+		close();
+		return;
+	}
 
 	_staticContent = QImage();
 	if (!_stories && _photo->videoCanBePlayed()) {
@@ -4698,6 +4848,10 @@ void OverlayWidget::displayPhoto(
 	}
 	contentSizeChanged();
 	refreshFromLabel();
+	if (!publicMediaAllowed(publicScope)) {
+		close();
+		return;
+	}
 	displayFinished(activation);
 }
 
@@ -4726,12 +4880,17 @@ void OverlayWidget::displayDocument(
 		anim::activation activation,
 		const Data::CloudTheme &cloud,
 		const StartStreaming &startStreaming) {
+	const auto publicScope = _publicMediaScope;
 	_fullScreenVideo = false;
 	_staticContent = QImage();
 	const auto documentChanged = (_document != doc);
 	clearStreaming(_document != doc);
 	destroyThemePreview();
 	assignMediaPointer(doc);
+	if (!publicMediaAllowed(publicScope)) {
+		close();
+		return;
+	}
 
 	_rotation = _document
 		? _document->owner().mediaRotation().get(_document)
@@ -4751,6 +4910,10 @@ void OverlayWidget::displayDocument(
 	_touchbarDisplay.fire(TouchBarItemType::None);
 
 	refreshMediaViewer();
+	if (!publicMediaAllowed(publicScope)) {
+		close();
+		return;
+	}
 	if (_document) {
 		if (_document->sticker()) {
 			if (const auto image = _documentMedia->getStickerLarge()) {
@@ -4766,14 +4929,18 @@ void OverlayWidget::displayDocument(
 			if (_documentMedia->canBePlayed()
 				&& initStreaming(startStreaming)) {
 			} else if (_document->isVideoFile()) {
-				_documentMedia->automaticLoad(fileOrigin(), _message);
+				if (!publicMediaScoped() || _document->saveToCache()) {
+					_documentMedia->automaticLoad(fileOrigin(), _message);
+				}
 				initStreamingThumbnail();
 			} else if (_document->isTheme()) {
 				_documentMedia->automaticLoad(fileOrigin(), _message);
 				initThemePreview();
 			} else {
-				_documentMedia->automaticLoad(fileOrigin(), _message);
-				_document->saveFromDataSilent();
+				if (!publicMediaScoped() || _document->saveToCache()) {
+					_documentMedia->automaticLoad(fileOrigin(), _message);
+				}
+				if (!publicMediaScoped()) _document->saveFromDataSilent();
 				auto &location = _document->location(true);
 				if (location.accessEnable()) {
 					setStaticContent(PrepareStaticImage({
@@ -4863,7 +5030,10 @@ void OverlayWidget::displayDocument(
 	}
 	refreshFromLabel();
 	_blurred = false;
-	if (_showAsPip && _streamed && _streamed->controls) {
+	if (!publicMediaAllowed(publicScope)) {
+		close();
+		return;
+	} else if (_showAsPip && _streamed && _streamed->controls) {
 		switchToPip();
 	} else {
 		displayFinished(activation);
@@ -4891,7 +5061,8 @@ void OverlayWidget::displayVideoStream(
 }
 
 void OverlayWidget::initSponsoredButton() {
-	const auto has = _message && _message->isSponsored() && _session;
+	const auto has = !publicMediaScoped()
+		&& _message && _message->isSponsored() && _session;
 	if (has && _sponsoredButton) {
 		return;
 	} else if (!has && _sponsoredButton) {
@@ -4943,15 +5114,22 @@ void OverlayWidget::updateThemePreviewGeometry() {
 }
 
 void OverlayWidget::displayFinished(anim::activation activation) {
+	const auto publicScope = _publicMediaScope;
 	updateControls();
+	if (!publicMediaAllowed(publicScope)) {
+		close();
+		return;
+	}
 	if (isHidden()) {
 		_helper->beforeShow(_fullscreen);
 		moveToScreen();
+		if (!publicMediaAllowed(publicScope)) return;
 		showAndActivate();
 	} else if (activation == anim::activation::background) {
 		return;
 	} else if (isMinimized()) {
 		_helper->beforeShow(_fullscreen);
+		if (!publicMediaAllowed(publicScope)) return;
 		showAndActivate();
 	} else {
 		activate();
@@ -5218,7 +5396,8 @@ bool OverlayWidget::createStreamingObjects() {
 			_body,
 			static_cast<PlaybackControls::Delegate*>(this));
 		_streamed->controls->show();
-		_streamed->sponsored = PlaybackSponsored::Has(_message)
+		_streamed->controls->setPictureInPictureAllowed(!publicMediaScoped());
+		_streamed->sponsored = !publicMediaScoped() && PlaybackSponsored::Has(_message)
 			? std::make_unique<PlaybackSponsored>(
 				_streamed->controls.get(),
 				uiShow(),
@@ -5798,6 +5977,7 @@ void OverlayWidget::applyVideoQuality(VideoQuality value) {
 }
 
 void OverlayWidget::switchToPip() {
+	if (publicMediaScoped()) return;
 	Expects(_streamed != nullptr);
 	Expects(_document != nullptr);
 
@@ -5880,6 +6060,10 @@ void OverlayWidget::storiesJumpTo(
 		Data::StoriesContext context) {
 	Expects(_stories != nullptr);
 	Expects(id.valid());
+	if (!session->leemen().allowsPeer(id.peer)) {
+		close();
+		return;
+	}
 
 	const auto maybeStory = session->data().stories().lookup(id);
 	if (!maybeStory) {
@@ -5907,6 +6091,10 @@ void OverlayWidget::storiesJumpTo(
 
 void OverlayWidget::storiesRedisplay(not_null<Data::Story*> story) {
 	Expects(_stories != nullptr);
+	if (!story->session().leemen().allowsPeer(story->peer()->id)) {
+		close();
+		return;
+	}
 
 	clearStreaming();
 	_streamingStartPaused = false;
@@ -6074,6 +6262,9 @@ void OverlayWidget::setSystemMediaControls(
 }
 
 bool OverlayWidget::contentNeedsScreenshotProtection() const {
+	if (publicMediaScoped() || Core::App().screenshotProtection().active()) {
+		return true;
+	}
 	if (const auto story = _stories ? _stories->story() : nullptr) {
 		return story->forbidsForward();
 	}
@@ -6091,7 +6282,7 @@ void OverlayWidget::refreshSystemMediaControls() {
 		return;
 	}
 	const auto self = static_cast<SystemMediaControlsVideoDelegate*>(this);
-	if (!_streamed || !_streamed->withSound) {
+	if (publicMediaScoped() || !_streamed || !_streamed->withSound) {
 		_smtcSink->videoFinish(self);
 		return;
 	}
@@ -6267,7 +6458,7 @@ void OverlayWidget::validatePhotoCurrentImage() {
 }
 
 void OverlayWidget::tryStartTextRecognition() {
-	if (_stories
+	if (publicMediaScoped() || _stories
 		|| !_session
 		|| !Platform::TextRecognition::IsAvailable()) {
 		return;
@@ -7393,7 +7584,7 @@ void OverlayWidget::handleKeyPress(not_null<QKeyEvent*> e) {
 		}
 	}
 	if (!_menu && key == Qt::Key_Escape) {
-		if (_document && _document->loading() && !_streamed) {
+		if (!publicMediaScoped() && _document && _document->loading() && !_streamed) {
 			handleDocumentClick();
 		} else {
 			close();
@@ -7712,8 +7903,15 @@ OverlayWidget::Entity OverlayWidget::entityForCollage(int index) const {
 
 OverlayWidget::Entity OverlayWidget::entityForItemId(const FullMsgId &itemId) const {
 	Expects(_session != nullptr);
+	if (publicMediaScoped()) return { v::null, nullptr };
+	if (!_session->leemen().allowsPeer(itemId.peer)) {
+		return { v::null, nullptr };
+	}
 
 	if (const auto item = _session->data().message(itemId)) {
+		if (item->isHiddenSavedMessage()) {
+			return { v::null, nullptr };
+		}
 		if (const auto media = item->media()) {
 			if (const auto photo = media->photo()) {
 				return { photo, item, _topicRootId, _monoforumPeerId };
@@ -7834,6 +8032,17 @@ void OverlayWidget::setSession(not_null<Main::Session*> session) {
 	clearSession();
 	_session = session;
 	_window->setWindowIcon(Window::CreateIcon(session));
+	const auto closePublicIfUnavailable = [=] {
+		if (publicMediaScoped() && !publicMediaAllowed()) close();
+	};
+	session->leemen().changes() | rpl::on_next(
+		closePublicIfUnavailable, _sessionLifetime);
+	session->domain().activeValue() | rpl::on_next(
+		closePublicIfUnavailable, _sessionLifetime);
+	Core::App().appDeactivatedValue() | rpl::on_next(
+		closePublicIfUnavailable, _sessionLifetime);
+	Core::App().passcodeLockValue() | rpl::on_next(
+		closePublicIfUnavailable, _sessionLifetime);
 
 	session->downloaderTaskFinished(
 	) | rpl::on_next([=] {
@@ -7860,7 +8069,7 @@ void OverlayWidget::setSession(not_null<Main::Session*> session) {
 		return (_message == item);
 	}) | rpl::on_next([=] {
 		const auto media = _message->media();
-		if (media
+		if (!publicMediaScoped() && media
 			&& media->ttlSecondsSingleView()
 			&& !isHidden()
 			&& (_photo || _document)) {
@@ -7876,6 +8085,10 @@ void OverlayWidget::setSession(not_null<Main::Session*> session) {
 	) | rpl::filter([=](not_null<const HistoryItem*> item) {
 		return (_message == item) && !isHidden();
 	}) | rpl::on_next([=] {
+		if (publicMediaScoped() && !publicMediaAllowed()) {
+			close();
+			return;
+		}
 		const auto media = _message->media();
 		const auto same = media
 			&& ((_photo && media->photo() == _photo)
@@ -7892,6 +8105,16 @@ void OverlayWidget::setSession(not_null<Main::Session*> session) {
 			close();
 		}
 	}, _sessionLifetime);
+	session->data().itemDataChanges(
+	) | rpl::on_next([=](not_null<HistoryItem*> item) {
+		if (!publicMediaScoped() || item != _message) return;
+		if (!publicMediaAllowed()) {
+			close();
+			return;
+		}
+		refreshCaption();
+		updateControls();
+	}, _sessionLifetime);
 
 	session->account().sessionChanges(
 	) | rpl::on_next([=] {
@@ -7899,8 +8122,32 @@ void OverlayWidget::setSession(not_null<Main::Session*> session) {
 	}, _sessionLifetime);
 }
 
+bool OverlayWidget::publicMediaScoped() const {
+	return _publicMediaScope.kind != Leemen::PublicMediaKind::None;
+}
+
+bool OverlayWidget::publicMediaAllowed() const {
+	return _session && _message
+		&& &_message->history()->session() == _session
+		&& PublicMessageMediaAllowed(_message, _photo, _document)
+		&& Leemen::AllowsPublicMedia(
+			_publicMediaScope,
+			PublicMessageMediaSelection(_message, _photo, _document, _publicMediaScope.request),
+			true);
+}
+
+bool OverlayWidget::publicMediaAllowed(
+		const Leemen::PublicMediaSelection &selection) const {
+	return selection.kind == Leemen::PublicMediaKind::None
+		? !publicMediaScoped()
+		: Leemen::AllowsPublicMedia(
+			selection, _publicMediaScope, publicMediaAllowed());
+}
+
 bool OverlayWidget::moveToNext(int delta) {
-	if (_stories) {
+	if (publicMediaScoped()) {
+		return false;
+	} else if (_stories) {
 		return _stories->subjumpFor(delta);
 	} else if (!_index) {
 		return false;
@@ -7910,10 +8157,16 @@ bool OverlayWidget::moveToNext(int delta) {
 }
 
 bool OverlayWidget::moveToEntity(const Entity &entity, int preloadDelta) {
+	if (publicMediaScoped()) return false;
 	if (v::is_null(entity.data) && !entity.item) {
 		return false;
 	}
 	if (const auto item = entity.item) {
+		if (!item->history()->session().leemen().allowsPeer(
+				item->history()->peer->id)
+			|| item->isHiddenSavedMessage()) {
+			return false;
+		}
 		setContext(ItemContext{
 			item,
 			entity.topicRootId,
@@ -7938,7 +8191,7 @@ bool OverlayWidget::moveToEntity(const Entity &entity, int preloadDelta) {
 }
 
 void OverlayWidget::preloadData(int delta) {
-	if (!_index) {
+	if (publicMediaScoped() || !_index) {
 		return;
 	}
 	auto from = *_index + (delta ? -delta : -1);
@@ -8833,6 +9086,9 @@ Window::SessionController *OverlayWidget::findWindow(bool switchTo) const {
 
 // #TODO unite and check
 void OverlayWidget::clearBeforeHide() {
+	if (_clearingBeforeHide) return;
+	_clearingBeforeHide = true;
+	const auto clearingGuard = gsl::finally([&] { _clearingBeforeHide = false; });
 	checkSingleViewMediaBurn();
 	_message = nullptr;
 	_sharedMedia = nullptr;
@@ -8900,6 +9156,8 @@ void OverlayWidget::clearAfterHide() {
 	_themeApply.destroyDelayed();
 	_themeCancel.destroyDelayed();
 	_themeShare.destroyDelayed();
+	_publicMediaScope = {};
+	refreshScreenshotProtection();
 }
 
 void OverlayWidget::receiveMouse() {

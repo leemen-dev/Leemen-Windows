@@ -24,6 +24,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "history/history_item.h"
 #include "history/history_unread_things.h"
 #include "main/main_session.h"
+#include "leemen/leemen_private_space.h"
 #include "window/notifications_manager.h"
 
 namespace Data {
@@ -671,7 +672,8 @@ void SavedSublist::readTill(MsgId tillId) {
 void SavedSublist::readTill(
 		MsgId tillId,
 		HistoryItem *tillIdItem) {
-	if (!IsServerMsgId(tillId)) {
+	if (!session().leemen().allowsPeer(owningHistory()->peer->id)
+		|| !IsServerMsgId(tillId)) {
 		return;
 	}
 	if (unreadMark()) {
@@ -697,6 +699,10 @@ void SavedSublist::readTill(
 }
 
 void SavedSublist::sendReadTillRequest() {
+	if (!session().leemen().allowsPeer(owningHistory()->peer->id)) {
+		_readRequestTimer.cancel();
+		return;
+	}
 	const auto parentChat = _parent->parentChat();
 	if (!parentChat) {
 		return;
@@ -903,6 +909,13 @@ int SavedSublist::fixedOnTopIndex() const {
 }
 
 bool SavedSublist::shouldBeInChatList() const {
+	const auto source = sublistPeer()->id;
+	if (!parentChat()
+		&& source != session().userPeerId()
+		&& source != PeerData::kSavedHiddenAuthorId
+		&& !session().leemen().allowsPeer(source)) {
+		return false;
+	}
 	const auto monoforum = _parent->parentChat();
 	if (monoforum && (monoforum == sublistPeer())) {
 		return false;

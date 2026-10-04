@@ -384,6 +384,7 @@ private:
 	void preloadListsMore();
 
 	void notifySourcesChanged(StorySourcesList list);
+	void refreshPrivateSpace();
 	void pushHiddenCountsToFolder();
 	void setPinnedToTop(
 		PeerId peerId,
@@ -429,6 +430,7 @@ private:
 
 	std::unordered_map<PeerId, StoriesSource> _all;
 	std::vector<StoriesSourceInfo> _sources[kStorySourcesListCount];
+	std::vector<StoriesSourceInfo> _visibleSources[kStorySourcesListCount];
 	rpl::event_stream<> _sourcesChanged[kStorySourcesListCount];
 	bool _sourcesLoaded[kStorySourcesListCount] = { false };
 	QString _sourcesStates[kStorySourcesListCount];

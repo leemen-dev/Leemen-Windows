@@ -531,8 +531,12 @@ void FieldHeader::init() {
 		}
 		const auto e = static_cast<QMouseEvent*>(event.get());
 		const auto pos = e->pos();
-		const auto inPreviewRect = _clickableRect.contains(pos);
-		const auto inPhotoEdit = _shownMessageHasPreview
+		const auto hiddenSaved = _history && _history->peer->isSelf()
+			&& _shownMessage
+			&& _shownMessage->isHiddenSavedMessage();
+		const auto inPreviewRect = !hiddenSaved
+			&& _clickableRect.contains(pos);
+		const auto inPhotoEdit = !hiddenSaved && _shownMessageHasPreview
 			&& _photoEditAllowed
 			&& _shownMessagePreviewRect.contains(pos);
 
@@ -748,7 +752,12 @@ void FieldHeader::paintEditOrReplyToMessage(Painter &p) {
 		return;
 	}
 
-	const auto media = _shownMessage->media();
+	const auto hiddenSaved = _history && _history->peer->isSelf()
+		&& _shownMessage->isHiddenSavedMessage();
+	if (hiddenSaved) {
+		updateShownMessageText();
+	}
+	const auto media = hiddenSaved ? nullptr : _shownMessage->media();
 	const auto poll = media ? media->poll() : nullptr;
 	const auto reply = displayedReplyingToMessage();
 	const auto pollAnswer = poll
@@ -763,7 +772,9 @@ void FieldHeader::paintEditOrReplyToMessage(Painter &p) {
 		&& (pollMediaPtr->photo || pollMediaPtr->document);
 	_shownMessageHasPreview = pollMediaHasPreview
 		|| (media && media->hasReplyPreview());
-	const auto preview = _mediaEditManager
+	const auto preview = hiddenSaved
+		? nullptr
+		: _mediaEditManager
 		? _mediaEditManager.mediaPreview()
 		: pollMediaHasPreview
 		? (pollMediaPtr->photo
@@ -819,19 +830,21 @@ void FieldHeader::paintEditOrReplyToMessage(Painter &p) {
 		_mediaEditManager.paintCoverUpload(p, to);
 	}
 
-	if (_suggestOptions) {
+	if (!hiddenSaved && _suggestOptions) {
 		_suggestOptions->paintLines(p, textLeft, 0, width());
 		return;
 	}
 
 	p.setPen(st::historyReplyNameFg);
 	p.setFont(st::msgServiceNameFont);
-	_shownMessageName.drawElided(
-		p,
-		textLeft,
-		st::msgReplyPadding.top(),
-		textAvailableWidth);
-	if (isEditingMessage()) {
+	if (!hiddenSaved) {
+		_shownMessageName.drawElided(
+			p,
+			textLeft,
+			st::msgReplyPadding.top(),
+			textAvailableWidth);
+	}
+	if (!hiddenSaved && isEditingMessage()) {
 		paintEditTimeLeft(p, textLeft, textAvailableWidth);
 	}
 
@@ -2529,7 +2542,7 @@ void ComposeControls::saveFieldToHistoryLocalDraft(bool save) {
 
 Data::Draft *ComposeControls::cloudDraft() const {
 	return _history
-		? _history->cloudDraft(_topicRootId, _monoforumPeerId)
+		? _history->composeCloudDraft(_topicRootId, _monoforumPeerId)
 		: nullptr;
 }
 

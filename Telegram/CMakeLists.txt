@@ -6,6 +6,13 @@
 
 add_executable(Telegram WIN32 MACOSX_BUNDLE)
 init_non_host_target(Telegram)
+target_compile_definitions(Telegram PRIVATE TDESKTOP_DISABLE_AUTOUPDATE)
+
+option(TDESKTOP_ENABLE_LEEMEN_PRIVATE_SPACE
+    "Enable enrollment in the experimental local Leemen private space" OFF)
+if (TDESKTOP_ENABLE_LEEMEN_PRIVATE_SPACE)
+    target_compile_definitions(Telegram PRIVATE TDESKTOP_ENABLE_LEEMEN_PRIVATE_SPACE)
+endif()
 
 add_subdirectory(lib_rpl)
 add_subdirectory(lib_crl)
@@ -25,6 +32,7 @@ get_filename_component(src_loc SourceFiles REALPATH)
 get_filename_component(res_loc Resources REALPATH)
 
 include(cmake/telegram_options.cmake)
+include(cmake/leemen_sodium.cmake)
 include(cmake/lib_ffmpeg.cmake)
 include(cmake/lib_stripe.cmake)
 include(cmake/lib_tgcalls.cmake)
@@ -64,6 +72,7 @@ set_target_properties(Telegram PROPERTIES AUTOMOC ON)
 
 target_link_libraries(Telegram
 PRIVATE
+    leemen::sodium
     tdesktop::lib_fido2
     tdesktop::lib_tgcalls
     tdesktop::td_export
@@ -1458,6 +1467,65 @@ PRIVATE
     main/main_app_config_values.h
     main/main_domain.cpp
     main/main_domain.h
+    leemen/leemen_private_space.cpp
+    leemen/leemen_private_limits.cpp
+    leemen/leemen_privacy_actions_box.cpp
+    leemen/leemen_privacy_actions_box.h
+    leemen/leemen_privacy_warning_box.cpp
+    leemen/leemen_privacy_warning_box.h
+    leemen/leemen_onboarding_box.cpp
+    leemen/leemen_onboarding_box.h
+    leemen/private_accounts_state.cpp
+    leemen/private_accounts_state.h
+    leemen/leemen_private_accounts.cpp
+    leemen/leemen_private_accounts.h
+    leemen/leemen_private_accounts_box.cpp
+    leemen/leemen_private_accounts_box.h
+    leemen/leemen_entry_shortcut.cpp
+    leemen/leemen_entry_shortcut.h
+    leemen/leemen_account_box.cpp
+    leemen/leemen_account_box.h
+    leemen/leemen_private_messages_box.cpp
+    leemen/leemen_private_messages_box.h
+    leemen/private_message_policy.h
+    leemen/public_media_policy.h
+    leemen/leemen_private_messages.cpp
+    leemen/leemen_max_privacy_box.cpp
+    leemen/leemen_max_privacy_box.h
+    leemen/leemen_private_space.h
+    leemen/leemen_private_space_sync.cpp
+    leemen/leemen_private_space_box.cpp
+    leemen/leemen_private_space_box.h
+    leemen/local_pin.cpp
+    leemen/local_pin.h
+    leemen/max_privacy.cpp
+    leemen/max_privacy.h
+    leemen/bip39_english.h
+    leemen/private_space_state.cpp
+    leemen/private_space_state.h
+    leemen/private_drafts.h
+    leemen/sync_backend.cpp
+    leemen/sync_backend.h
+    leemen/sync_blob.cpp
+    leemen/sync_blob.h
+    leemen/sync_coordinator.cpp
+    leemen/sync_coordinator.h
+    leemen/security_policy.cpp
+    leemen/security_policy.h
+    leemen/sync_local_intents.h
+    leemen/sync_crypto.cpp
+    leemen/sync_crypto.h
+    leemen/sync_identifiers.cpp
+    leemen/sync_identifiers.h
+    leemen/sync_peer_id.h
+    leemen/sync_service.cpp
+    leemen/sync_service.h
+    leemen/sync_session_snapshot.cpp
+    leemen/sync_session_snapshot.h
+    leemen/realtime_protocol.cpp
+    leemen/realtime_protocol.h
+    leemen/sync_realtime.cpp
+    leemen/sync_realtime.h
     main/main_session.cpp
     main/main_session.h
     main/main_session_settings.cpp
@@ -2273,6 +2341,7 @@ if (WIN32)
         target_link_libraries(Telegram PRIVATE desktop-app::win_directx_helper)
     endif()
 
+    target_link_libraries(Telegram PRIVATE dnsapi)
     target_link_options(Telegram PRIVATE /PDBPAGESIZE:8192)
 elseif (APPLE)
     if (NOT DESKTOP_APP_USE_PACKAGED)
@@ -2400,6 +2469,10 @@ if (CMAKE_GENERATOR STREQUAL Xcode)
     set(bundle_identifier_plist "$(PRODUCT_BUNDLE_IDENTIFIER)")
 else()
     set(bundle_identifier_plist ${bundle_identifier})
+endif()
+
+if (WIN32)
+    set(output_name "Leemen")
 endif()
 
 set_target_properties(Telegram PROPERTIES

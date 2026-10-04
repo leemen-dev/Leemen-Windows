@@ -19,6 +19,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "main/main_domain.h"
 #include "main/main_session.h"
 #include "main/main_session_settings.h"
+#include "leemen/leemen_private_accounts.h"
 #include "boxes/abstract_box.h"
 #include "core/application.h"
 #include "core/core_settings.h"
@@ -198,6 +199,7 @@ void Step::finish(const MTPUser &user, QImage &&photo) {
 		if (const auto session = raw->maybeSession()) {
 			if (raw->mtp().environment() == _account->mtp().environment()
 				&& UserId(user.c_user().vid()) == session->userId()) {
+				if (_account->domain().privateAccounts().redirectDuplicateLogin(_account)) return;
 				_account->logOut();
 				crl::on_main(raw, [=] {
 					Core::App().domain().activate(raw);

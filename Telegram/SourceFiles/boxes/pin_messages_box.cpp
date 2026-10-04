@@ -8,9 +8,11 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "boxes/pin_messages_box.h"
 
 #include "apiwrap.h"
+#include "base/weak_ptr.h"
 #include "data/data_chat.h"
 #include "data/data_user.h"
 #include "lang/lang_keys.h"
+#include "leemen/leemen_private_space.h"
 #include "history/history.h"
 #include "history/history_item.h"
 #include "main/main_session.h"
@@ -115,8 +117,14 @@ void PinMessageBox(
 			peer->input(),
 			MTP_int(msgId)
 		)).done([=](const MTPUpdates &result) {
+			const auto id = FullMsgId(peer->id, msgId);
+			const auto weak = base::make_weak(&peer->session());
+			const auto weakBox = QPointer<Ui::GenericBox>(box);
 			peer->session().api().applyUpdates(result);
-			box->closeBox();
+			if (weakBox) weakBox->closeBox();
+			if (const auto session = weak.get()) {
+				session->leemen().recordSelfPin(id, true);
+			}
 		}).fail([=] {
 			box->closeBox();
 		}).send();

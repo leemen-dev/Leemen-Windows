@@ -10,6 +10,8 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "base/timer.h"
 #include "base/weak_ptr.h"
 
+#include <set>
+
 namespace Storage {
 class Domain;
 enum class StartResult : uchar;
@@ -18,6 +20,10 @@ enum class StartResult : uchar;
 namespace MTP {
 enum class Environment : uchar;
 } // namespace MTP
+
+namespace Leemen {
+class PrivateAccounts;
+} // namespace Leemen
 
 namespace Main {
 
@@ -48,10 +54,12 @@ public:
 	[[nodiscard]] Storage::Domain &local() const {
 		return *_local;
 	}
+	[[nodiscard]] Leemen::PrivateAccounts &privateAccounts() const;
 
 	[[nodiscard]] auto accounts() const
 		-> const std::vector<AccountWithIndex> &;
 	[[nodiscard]] std::vector<not_null<Account*>> orderedAccounts() const;
+	[[nodiscard]] std::vector<not_null<Account*>> nonHiddenAccounts() const;
 	[[nodiscard]] rpl::producer<Account*> activeValue() const;
 	[[nodiscard]] rpl::producer<> accountsChanges() const;
 	[[nodiscard]] Account *maybeLastOrSomeAuthedAccount();
@@ -59,6 +67,7 @@ public:
 
 	// Expects(started());
 	[[nodiscard]] Account &active() const;
+	[[nodiscard]] Account *maybeActive() const;
 	[[nodiscard]] rpl::producer<not_null<Account*>> activeChanges() const;
 
 	[[nodiscard]] rpl::producer<Session*> activeSessionValue() const;
@@ -70,6 +79,8 @@ public:
 	void notifyUnreadBadgeChanged();
 
 	[[nodiscard]] not_null<Main::Account*> add(MTP::Environment environment);
+	[[nodiscard]] Account *addHidden(not_null<Session*> owner);
+	bool removePrivateLogin(not_null<Account*> account);
 	void maybeActivate(not_null<Main::Account*> account);
 	void activate(not_null<Main::Account*> account);
 	void addActivated(MTP::Environment environment, bool newWindow = false);
@@ -83,6 +94,7 @@ public:
 	[[nodiscard]] int activeForStorage() const;
 
 private:
+	Account *addImpl(MTP::Environment environment, Session *privateOwner);
 	void activateAfterStarting();
 	void closeAccountWindows(not_null<Main::Account*> account);
 	bool removePasscodeIfEmpty();
@@ -95,8 +107,10 @@ private:
 
 	const QString _dataName;
 	const std::unique_ptr<Storage::Domain> _local;
+	const std::unique_ptr<Leemen::PrivateAccounts> _privateAccounts;
 
 	std::vector<AccountWithIndex> _accounts;
+	std::set<int> _removingAccountIndices;
 	rpl::event_stream<> _accountsChanges;
 	rpl::variable<Account*> _active = nullptr;
 	int _accountToActivate = -1;
