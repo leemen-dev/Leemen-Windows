@@ -20,9 +20,11 @@ struct Invalid final : std::runtime_error {
 };
 
 JsonLimits Bounded(JsonLimits limits) {
-	limits.maxBytes = std::min(limits.maxBytes, std::size_t(1024 * 1024));
-	limits.maxDepth = std::min(limits.maxDepth, std::size_t(64));
-	limits.maxNodes = std::min(limits.maxNodes, std::size_t(131072));
+	const auto local = limits.budget == JsonBudget::LocalCheckpoint;
+	limits.maxBytes = std::min(limits.maxBytes,
+		std::size_t((local ? 2 : 1) * 1024 * 1024));
+	limits.maxDepth = std::min(limits.maxDepth, std::size_t(local ? 68 : 64));
+	limits.maxNodes = std::min(limits.maxNodes, std::size_t(local ? 524288 : 131072));
 	return limits;
 }
 

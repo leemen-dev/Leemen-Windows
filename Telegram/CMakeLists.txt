@@ -1473,6 +1473,8 @@ PRIVATE
     leemen/leemen_privacy_actions_box.h
     leemen/leemen_privacy_warning_box.cpp
     leemen/leemen_privacy_warning_box.h
+    leemen/leemen_onboarding_box.cpp
+    leemen/leemen_onboarding_box.h
     leemen/private_accounts_state.cpp
     leemen/private_accounts_state.h
     leemen/leemen_private_accounts.cpp
@@ -1486,6 +1488,7 @@ PRIVATE
     leemen/leemen_private_messages_box.cpp
     leemen/leemen_private_messages_box.h
     leemen/private_message_policy.h
+    leemen/public_media_policy.h
     leemen/leemen_private_messages.cpp
     leemen/leemen_max_privacy_box.cpp
     leemen/leemen_max_privacy_box.h

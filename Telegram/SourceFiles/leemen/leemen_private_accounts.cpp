@@ -12,6 +12,7 @@
 #include "main/main_session.h"
 #include "media/player/media_player_instance.h"
 #include "storage/storage_domain.h"
+#include "storage/storage_account.h"
 #include "window/notifications_manager.h"
 #include "window/window_controller.h"
 #include "window/window_session_controller.h"
@@ -86,12 +87,16 @@ void PrivateAccounts::start() {
 	_domain->activeValue() | rpl::on_next([=](Main::Account *account) {
 		++_epoch;
 		_operation = 0;
+		if (_loginSlot && (!account || account->localIndex() != *_loginSlot)) {
+			_loginSlot.reset();
+			_screenProtected = false;
+		}
 		if (_grant && (!account || !account->maybeSession()
 			|| PrivateAccountIdentity(&account->session()) != *_grant)) {
 			_grant.reset();
 			_returnTo.reset();
 			closeHiddenWindows();
-			_screenProtected = false;
+			_screenProtected = _loginSlot && account && account->localIndex() == *_loginSlot;
 		}
 		notify();
 	}, _lifetime);
@@ -102,6 +107,7 @@ void PrivateAccounts::finish() {
 	_operation = 0;
 	_grant.reset();
 	_returnTo.reset();
+	_loginSlot.reset();
 	_screenProtected = false;
 	_lifetime.destroy();
 	_started = false;
@@ -155,27 +161,171 @@ void PrivateAccounts::blockCorruptedStartup() {
 
 bool PrivateAccounts::damaged() const { return _damaged; }
 
-bool PrivateAccounts::configured() const { return _damaged || !_state.snapshot().empty(); }
+bool PrivateAccounts::configured() const { return _damaged || !_state.snapshot().empty() || !_state.logins().empty(); }
 
-bool PrivateAccounts::startupAllowed(std::span<const std::uint64_t> identities) const {
-	if (_damaged) return false;
-	for (const auto value : identities) {
-		if (!value) return true;
-		const auto test = (value & 0x0100'0000'0000'0000ULL) != 0;
-		const auto id = AccountIdentity{ value & ~0x0100'0000'0000'0000ULL, test };
-		if (ValidAccountIdentity(id) && !_state.isHiddenByAny(id)) return true;
+bool PrivateAccounts::startupAllowed(const PrivateAccountSlots &accounts) {
+	return !_damaged && _state.reconcileStartup(accounts);
+}
+
+bool PrivateAccounts::reserved(not_null<Main::Account*> account) const {
+	return _state.logins().contains(std::uint32_t(account->localIndex()));
+}
+
+bool PrivateAccounts::loginCancelling(not_null<Main::Account*> account) const {
+	const auto i = _state.logins().find(std::uint32_t(account->localIndex()));
+	return i != _state.logins().end() && i->second.cancelling;
+}
+
+bool PrivateAccounts::pendingLogin(not_null<Main::Session*> owner, not_null<Main::Account*> account) const {
+	const auto i = _state.logins().find(std::uint32_t(account->localIndex()));
+	return i != _state.logins().end() && i->second.owner == PrivateAccountIdentity(owner)
+		&& (!account->maybeSession() || i->second.cancelling || !i->second.completed);
+}
+
+bool PrivateAccounts::reserveLogin(not_null<Main::Session*> owner, not_null<Main::Account*> account) {
+	if (!managementAllowed(owner) || !owner->leemen().active() || !PrivateSpace::EnrollmentEnabled()
+		|| !owner->leemen().syncEnabled()
+		|| owner->leemen().syncService().premium().access != Security::PremiumAccess::Active) return false;
+	if (!_state.reserveLogin(std::uint32_t(account->localIndex()), PrivateAccountIdentity(owner), true)) return false;
+	return true;
+}
+
+bool PrivateAccounts::persistNewLogin(not_null<Main::Account*> account) {
+	if (!reserved(account) || account->maybeSession() || !account->local().writeMtpDataSync()
+		|| !account->local().writeMtpConfigSync() || !persist()) {
+		persistenceFailed();
+		return false;
 	}
-	return false;
+	return true;
+}
+
+bool PrivateAccounts::beginLogin(not_null<Main::Session*> owner) {
+	if (!managementAllowed(owner) || !owner->leemen().active()) return false;
+	const auto account = _domain->addHidden(owner);
+	return account && resumeLogin(owner, account);
+}
+
+bool PrivateAccounts::resumeLogin(not_null<Main::Session*> owner, not_null<Main::Account*> account) {
+	if (!managementAllowed(owner) || !owner->leemen().active() || !pendingLogin(owner, account)
+		|| account->maybeSession() || account->loggingOut()) return false;
+	const auto &login = _state.logins().at(std::uint32_t(account->localIndex()));
+	if (login.cancelling) return false;
+	_loginSlot = account->localIndex();
+	_screenProtected = true;
+	_domain->activate(account);
+	return true;
+}
+
+void PrivateAccounts::returnFromLogin(AccountIdentity owner) {
+	_loginSlot.reset();
+	if (const auto safe = safeAccount(accountFor(owner))) _domain->activate(safe);
+	closeHiddenWindows();
+	_screenProtected = false;
+	notify();
+}
+
+bool PrivateAccounts::cancelLogin(not_null<Main::Session*> owner, not_null<Main::Account*> account) {
+	if (!managementAllowed(owner) || !pendingLogin(owner, account)) return false;
+	_state.cancelLogin(std::uint32_t(account->localIndex()));
+	if (!persist()) { persistenceFailed(); return false; }
+	const auto ownerId = PrivateAccountIdentity(owner);
+	const auto weakAccount = base::make_weak(account);
+	returnFromLogin(ownerId);
+	if (weakAccount) weakAccount->logOut();
+	return true;
+}
+
+bool PrivateAccounts::redirectDuplicateLogin(not_null<Main::Account*> account) {
+	const auto i = _state.logins().find(std::uint32_t(account->localIndex()));
+	if (i == _state.logins().end()) return false;
+	const auto owner = i->second.owner;
+	_state.cancelLogin(i->first);
+	if (!persist()) { persistenceFailed(); return true; }
+	const auto guard = QPointer<PrivateAccounts>(this);
+	const auto weakAccount = base::make_weak(account);
+	crl::on_main(account, [=] {
+		if (!guard) return;
+		guard->returnFromLogin(owner);
+		if (weakAccount) weakAccount->logOut();
+	});
+	return true;
+}
+
+void PrivateAccounts::completeLogin(not_null<Main::Account*> account, not_null<Main::Session*> session) {
+	const auto slot = std::uint32_t(account->localIndex());
+	const auto i = _state.logins().find(slot);
+	if (i == _state.logins().end()) return;
+	const auto login = i->second;
+	const auto id = PrivateAccountIdentity(session);
+	const auto changed = !login.completed;
+	const auto completed = !login.cancelling && _state.completeLogin(slot, id);
+	if (!login.cancelling && !completed) {
+		if (login.completed) {
+			blockCorruptedStartup();
+		} else {
+			_state.cancelLogin(slot);
+			if (!persist()) blockCorruptedStartup();
+		}
+	} else if (completed && changed && !persist()) {
+		blockCorruptedStartup();
+	}
+	const auto guard = QPointer<PrivateAccounts>(this);
+	const auto weak = base::make_weak(session);
+	crl::on_main(account, [=] {
+		if (!guard || !weak || account->maybeSession() != weak.get()) return;
+		if (guard->_damaged) { guard->persistenceFailed(); return; }
+		const auto current = guard->_state.logins().find(slot);
+		if (current == guard->_state.logins().end()) return;
+		const auto cancelling = current->second.cancelling;
+		if (guard->_loginSlot == int(slot)) guard->returnFromLogin(login.owner);
+		if (weak && (cancelling || !guard->accountFor(login.owner))) account->logOut();
+	});
+}
+
+void PrivateAccounts::loginLoggedOut(not_null<Main::Account*> account) {
+	if (!reserved(account)) return;
+	_state.cancelLogin(std::uint32_t(account->localIndex()));
+	if (!persist() || !account->local().writeMtpDataSync()) { persistenceFailed(); return; }
+	const auto guard = QPointer<PrivateAccounts>(this);
+	crl::on_main(account, [=] {
+		if (!guard || account->maybeSession() || account->loggingOut()) return;
+		guard->lock();
+		if (!guard->_domain->removePrivateLogin(account)) guard->persistenceFailed();
+	});
+}
+
+bool PrivateAccounts::releaseRemovedLogin(int slot) {
+	const auto i = _state.logins().find(std::uint32_t(slot));
+	if (i == _state.logins().end()) return false;
+	const auto previous = _state;
+	const auto completed = i->second.completed;
+	_state.releaseLogin(std::uint32_t(slot));
+	if (completed) {
+		auto snapshot = _state.snapshot();
+		for (auto j = snapshot.begin(); j != snapshot.end();) {
+			j->second.hidden.erase(*completed);
+			if (j->first == *completed) j->second.switchPin.reset();
+			if (j->second.hidden.empty() && !j->second.switchPin) j = snapshot.erase(j);
+			else ++j;
+		}
+		Expects(_state.restore(std::move(snapshot)));
+	}
+	if (!persist()) { _state = previous; persistenceFailed(); return false; }
+	return true;
 }
 
 bool PrivateAccounts::hidden(not_null<Main::Account*> account) const {
 	const auto session = account->maybeSession();
-	return session && (_damaged || _state.isHiddenByAny(PrivateAccountIdentity(session)));
+	return reserved(account) || (session && (_damaged || _state.isHiddenByAny(PrivateAccountIdentity(session))));
 }
 
 int PrivateAccounts::hiddenCount(not_null<Main::Session*> owner) const {
 	const auto i = _state.snapshot().find(PrivateAccountIdentity(owner));
-	return i == _state.snapshot().end() ? 0 : int(i->second.hidden.size());
+	const auto id = PrivateAccountIdentity(owner);
+	return (i == _state.snapshot().end() ? 0 : int(i->second.hidden.size()))
+		+ int(std::count_if(_state.logins().begin(), _state.logins().end(), [&](const auto &entry) {
+			return entry.second.owner == id && !entry.second.completed;
+		}));
 }
 
 int PrivateAccounts::unavailableHiddenCount(not_null<Main::Session*> owner) const {
@@ -191,8 +341,9 @@ bool PrivateAccounts::hiddenBy(not_null<Main::Session*> owner, not_null<Main::Ac
 
 bool PrivateAccounts::visibleFrom(not_null<Main::Account*> viewer, not_null<Main::Account*> target) const {
 	const auto targetSession = target->maybeSession();
+	if (reserved(target) && !targetSession) return false;
 	if (!targetSession) return true;
-	if (_damaged) return false;
+	if (_damaged || _state.loginBlocks(std::uint32_t(target->localIndex()), PrivateAccountIdentity(targetSession))) return false;
 	const auto viewerSession = viewer->maybeSession();
 	return viewerSession
 		? !_state.hiddenFrom(PrivateAccountIdentity(viewerSession), PrivateAccountIdentity(targetSession), viewerSession->leemen().active())
@@ -202,13 +353,24 @@ bool PrivateAccounts::visibleFrom(not_null<Main::Account*> viewer, not_null<Main
 bool PrivateAccounts::contentAllowed(not_null<Main::Session*> session) const {
 	if (_damaged) return false;
 	const auto id = PrivateAccountIdentity(session);
+	if (_state.loginBlocks(std::uint32_t(session->account().localIndex()), id)) return false;
 	return !_state.isHiddenByAny(id) || (_grant == id
 		&& _domain->maybeActive() == &session->account() && Foreground());
 }
 
 bool PrivateAccounts::canActivate(not_null<Main::Account*> account) const {
+	if (reserved(account) && !account->maybeSession()) {
+		return !_damaged && _loginSlot == account->localIndex() && Foreground();
+	}
+	if (const auto session = account->maybeSession(); session
+		&& _state.loginBlocks(std::uint32_t(account->localIndex()), PrivateAccountIdentity(session))) return false;
 	return !account->maybeSession() || (!_damaged && (!hidden(account)
 		|| (_grant == PrivateAccountIdentity(&account->session()) && Foreground())));
+}
+
+Main::Account *PrivateAccounts::accountAt(int slot) const {
+	for (const auto &[index, account] : _domain->accounts()) if (index == slot) return account.get();
+	return nullptr;
 }
 
 Main::Account *PrivateAccounts::accountFor(AccountIdentity identity) const {
@@ -222,14 +384,16 @@ Main::Account *PrivateAccounts::safeAccount(Main::Account *preferred) const {
 	if (_damaged) return nullptr;
 	auto available = std::vector<AccountIdentity>();
 	for (const auto &[index, account] : _domain->accounts()) {
-		if (const auto session = account->maybeSession()) available.push_back(PrivateAccountIdentity(session));
+		if (const auto session = account->maybeSession(); session && !hidden(account.get())) {
+			available.push_back(PrivateAccountIdentity(session));
+		}
 	}
 	const auto preferredId = preferred && preferred->maybeSession()
 		? std::make_optional(PrivateAccountIdentity(&preferred->session())) : std::nullopt;
 	const auto result = _state.safeAccount(available, preferredId);
 	if (result) return accountFor(*result);
 	for (const auto &[index, account] : _domain->accounts()) {
-		if (!account->maybeSession()) return account.get();
+		if (!account->maybeSession() && !reserved(account.get())) return account.get();
 	}
 	return nullptr;
 }
@@ -279,12 +443,12 @@ bool PrivateAccounts::setHidden(not_null<Main::Session*> owner, not_null<Main::A
 		|| (hide && (!PrivateSpace::EnrollmentEnabled() || !owner->leemen().active()))) return false;
 	const auto premium = owner->leemen().syncEnabled()
 		&& owner->leemen().syncService().premium().access == Security::PremiumAccess::Active;
-	const auto previous = _state.snapshot();
+	const auto previous = _state;
 	const auto result = _state.setHidden(PrivateAccountIdentity(owner), PrivateAccountIdentity(&target->session()), hide, premium);
 	if (result == HideAccountResult::Unchanged) return true;
 	if (result != HideAccountResult::Changed) return false;
 	if (!persist()) {
-		if (!hide) Expects(_state.restore(previous));
+		if (!hide) _state = previous;
 		persistenceFailed();
 		return false;
 	}
@@ -304,17 +468,17 @@ bool PrivateAccounts::setHidden(not_null<Main::Session*> owner, not_null<Main::A
 
 bool PrivateAccounts::revealUnavailable(not_null<Main::Session*> owner) {
 	if (!managementAllowed(owner)) return false;
-	const auto previous = _state.snapshot();
+	const auto previous = _state;
 	const auto id = PrivateAccountIdentity(owner);
-	const auto i = previous.find(id);
-	if (i == previous.end()) return true;
+	const auto i = previous.snapshot().find(id);
+	if (i == previous.snapshot().end()) return true;
 	for (const auto child : i->second.hidden) {
 		if (!accountFor(child)) {
 			Expects(_state.setHidden(id, child, false, false) == HideAccountResult::Changed);
 		}
 	}
 	if (!persist()) {
-		Expects(_state.restore(previous));
+		_state = previous;
 		persistenceFailed();
 		return false;
 	}
@@ -331,6 +495,7 @@ std::uint64_t PrivateAccounts::activateWithPin(not_null<Main::Account*> target, 
 	const auto owner = &_domain->active().session();
 	const auto ownerId = PrivateAccountIdentity(owner);
 	const auto targetId = PrivateAccountIdentity(&target->session());
+	if (_state.loginBlocks(std::uint32_t(target->localIndex()), targetId)) return Reject(std::move(done));
 	if (!owner->leemen().active() || !_state.isHiddenBy(ownerId, targetId)
 		|| retryAfterSeconds()) return Reject(std::move(done));
 	const auto existing = _state.switchPin(ownerId);
@@ -403,11 +568,11 @@ std::uint64_t PrivateAccounts::setSwitchPin(not_null<Main::Session*> owner, cons
 			done(false);
 			return;
 		}
-		const auto previous = guard->_state.snapshot();
+		const auto previous = guard->_state;
 		const auto changed = guard->_state.setSwitchPin(id, std::move(value));
 		const auto success = changed && guard->persist();
 		if (!success) {
-			Expects(guard->_state.restore(previous));
+			guard->_state = previous;
 			if (changed) guard->persistenceFailed();
 		}
 		++guard->_epoch;
@@ -430,35 +595,60 @@ void PrivateAccounts::watchAccount(not_null<Main::Account*> account) {
 		if (!session) {
 			if (*identity && !Core::Quitting()) loggedOut(**identity);
 			identity->reset();
+			const auto i = _state.logins().find(std::uint32_t(account->localIndex()));
+			if (i != _state.logins().end() && i->second.cancelling && !account->loggingOut()) {
+				const auto guard = QPointer<PrivateAccounts>(this);
+				crl::on_main(account, [=] {
+					if (guard && guard->loginCancelling(account) && !account->loggingOut()) account->logOut();
+				});
+			}
 			return;
 		}
 		*identity = PrivateAccountIdentity(session);
 		session->leemen().changes() | rpl::on_next([=] { notify(); }, session->lifetime());
-		if (!contentAllowed(session)) lock();
+		if (reserved(account)) {
+			const auto guard = QPointer<PrivateAccounts>(this);
+			const auto weak = base::make_weak(session);
+			crl::on_main(account, [=] { if (guard && weak && !guard->contentAllowed(weak.get())) guard->lock(); });
+		} else if (!contentAllowed(session)) lock();
 	}, account->lifetime());
 }
 
 void PrivateAccounts::loggedOut(AccountIdentity account) {
 	++_epoch;
 	_operation = 0;
-	if (_state.snapshot().empty()) return;
+	if (_state.snapshot().empty() && _state.logins().empty()) return;
 	const auto children = _state.logoutClosure(account);
-	for (const auto child : children) {
-		if (const auto target = accountFor(child); target && !target->loggingOut()) target->logOut();
+	const auto previous = _state;
+	auto pending = std::vector<int>();
+	auto bound = false;
+	for (const auto &[slot, login] : _state.logins()) {
+		bound = bound || login.completed == account;
+		if (login.owner == account || login.completed == account
+			|| std::ranges::find(children, login.owner) != children.end()) {
+			_state.cancelLogin(slot);
+			pending.push_back(int(slot));
+		}
 	}
-	const auto previous = _state.snapshot();
-	auto snapshot = previous;
+	auto snapshot = _state.snapshot();
 	for (auto i = snapshot.begin(); i != snapshot.end();) {
-		i->second.hidden.erase(account);
+		if (!bound) i->second.hidden.erase(account);
 		if (i->first == account) i->second.switchPin.reset();
 		if (i->second.hidden.empty() && !i->second.switchPin) i = snapshot.erase(i);
 		else ++i;
 	}
 	Expects(_state.restore(std::move(snapshot)));
 	if (!persist()) {
-		Expects(_state.restore(previous));
+		_state = previous;
 		persistenceFailed();
 		return;
+	}
+	for (const auto child : children) {
+		if (const auto target = accountFor(child); target && !target->loggingOut()) target->logOut();
+	}
+	for (const auto slot : pending) {
+		if (const auto target = accountAt(slot); target && !target->loggingOut()
+			&& (!target->maybeSession() || PrivateAccountIdentity(&target->session()) != account)) target->logOut();
 	}
 	lock();
 }
@@ -467,15 +657,23 @@ void PrivateAccounts::closeHiddenWindows() {
 	auto windows = std::vector<base::weak_ptr<Window::Controller>>();
 	for (const auto window : Core::App().windowStack()) windows.push_back(base::make_weak(window));
 	for (const auto &weak : windows) {
-		const auto window = weak.get();
+		auto window = weak.get();
 		if (!window) continue;
 		const auto session = window->maybeSession();
 		if (!session || !hidden(&session->account())) continue;
 		Core::App().notifications().clearFromSession(session);
+		window = weak.get();
+		if (!window || window->maybeSession() != session) continue;
 		if (!contentAllowed(session)) {
 			Iv::Editor::CloseWindowsForSession(session);
+			window = weak.get();
+			if (!window || window->maybeSession() != session) continue;
 			window->hideSettingsAndLayer(anim::type::instant);
+			window = weak.get();
+			if (!window || window->maybeSession() != session) continue;
 			window->widget()->hide();
+			window = weak.get();
+			if (!window || window->maybeSession() != session) continue;
 			if (!window->isPrimary()) Core::App().closeWindow(window);
 			else if (!Core::App().closeNonLastAsync(window)) continue;
 		}
@@ -488,7 +686,12 @@ void PrivateAccounts::lock() {
 	++_epoch;
 	_operation = 0;
 	_grant.reset();
-	const auto fallback = _returnTo ? accountFor(*_returnTo) : nullptr;
+	auto fallback = _returnTo ? accountFor(*_returnTo) : nullptr;
+	if (_loginSlot) {
+		const auto i = _state.logins().find(std::uint32_t(*_loginSlot));
+		if (i != _state.logins().end()) fallback = accountFor(i->second.owner);
+	}
+	_loginSlot.reset();
 	_returnTo.reset();
 	if (_domain->maybeActive() && hidden(_domain->maybeActive())) {
 		Core::App().hideMediaView();

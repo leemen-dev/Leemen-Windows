@@ -8816,6 +8816,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 "lng_leemen_sync_writing" = "Saving encrypted changes…";
 "lng_leemen_sync_ready" = "Private Space is synchronized. Continue to enter it.";
 "lng_leemen_sync_error" = "Synchronization could not be completed. Access remains protected and pending changes are kept. Continue to retry.";
+"lng_leemen_sync_cached" = "Leemen is unavailable. Ordinary chats use the last confirmed hidden-chat list; hidden chats remain closed. Connect again to open Private Space or change its settings.";
 "lng_leemen_sync_deleted" = "This Leemen account has been deleted. Private Space remains closed.";
 "lng_leemen_sync_passphrase" = "Leemen passphrase or recovery phrase";
 "lng_leemen_sync_passphrase_about" = "Maximum privacy is enabled. Enter your Leemen passphrase, or select recovery and enter the 12 recovery words. This is separate from your Telegram password.";
@@ -8856,10 +8857,10 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 "lng_leemen_message_pending" = "Sent outside Private Space — awaiting your decision\n";
 "lng_leemen_message_self_pinned" = "Pinned by you";
 "lng_leemen_public_messages_open" = "Messages visible outside Private Space";
-"lng_leemen_public_messages_about" = "Only messages chosen to appear outside Private Space are shown here. Messages you send here remain visible until you decide otherwise in Private Space. This view supports text and captions; attachments and quoted messages open inside Private Space.";
+"lng_leemen_public_messages_about" = "Only messages chosen to appear outside Private Space are shown here. Messages you send here remain visible until you decide otherwise in Private Space. Read text and captions, or open a permitted photo, video or animation individually. Timed media, other files and quoted-message navigation open inside Private Space.";
 "lng_leemen_public_messages_empty" = "No messages are visible here yet.";
 "lng_leemen_public_messages_unavailable" = "Message content unavailable";
-"lng_leemen_public_messages_attachment" = "Attachment — open in Private Space";
+"lng_leemen_public_messages_attachment" = "Attachment";
 "lng_leemen_public_messages_write" = "Write a message outside Private Space";
 "lng_leemen_public_messages_more" = "Show earlier messages";
 "lng_leemen_public_messages_loading" = "Loading message…";
@@ -8883,7 +8884,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 "lng_leemen_account_refresh" = "Refresh account information";
 "lng_leemen_account_delete_link" = "Delete Leemen account…";
 "lng_leemen_account_delete_title" = "Delete Leemen account";
-"lng_leemen_account_delete_about" = "This permanently deletes your Leemen cloud account, synchronized Private Space data and linked account data. This account will be signed out on this device once the server confirms deletion. Other Leemen sessions lose access to this Leemen account. Your Telegram account and Telegram messages are not deleted. This cannot be undone.";
+"lng_leemen_account_delete_about" = "This permanently deletes your Leemen cloud account, synchronized Private Space data and linked account data. This account and accounts hidden by it will be signed out on this device once the server confirms deletion. Other Leemen sessions lose access to this Leemen account. Your Telegram account and Telegram messages are not deleted. This cannot be undone.";
 "lng_leemen_account_delete_type" = "Type DELETE to confirm";
 "lng_leemen_account_delete_sending" = "Deleting Leemen account…";
 "lng_leemen_account_delete_pending" = "The server has not confirmed deletion. Access to Private Space stays blocked while the result is uncertain. To make another deletion request, type DELETE again and press Delete Leemen account.";
@@ -8926,6 +8927,11 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 "lng_leemen_accounts_reveal_unavailable" = "Reveal unavailable accounts";
 "lng_leemen_reset_done" = "Private Space has been reset.";
 "lng_leemen_accounts_title" = "Hidden accounts";
+"lng_leemen_public_messages_open_attachment" = "Open attachment";
+"lng_leemen_accounts_add" = "Add new hidden account";
+"lng_leemen_accounts_login_pending" = "A hidden account sign-in is unfinished. Complete or cancel it before adding another account.";
+"lng_leemen_accounts_login_resume" = "Continue sign-in";
+"lng_leemen_accounts_login_cancel" = "Cancel sign-in";
 "lng_leemen_accounts_about" = "Hidden accounts appear only in their owner's Private Space. Their notifications stay hidden. Leaving the app returns to a visible account.";
 "lng_leemen_accounts_hide" = "Hide {name}";
 "lng_leemen_accounts_reveal" = "Reveal {name}";
@@ -8958,3 +8964,19 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 "lng_leemen_privacy_check_sessions_ok" = "No active session from another Telegram app was found.";
 "lng_leemen_privacy_check_sessions" = "Manage Telegram sessions";
 "lng_leemen_privacy_check_refresh" = "Check again";
+
+"lng_leemen_tour_title" = "Private Space guide";
+"lng_leemen_tour_step1_title" = "1 of 4 · Entering and leaving";
+"lng_leemen_tour_step1" = "Enter Private Space to see hidden content. Leaving the app, switching accounts or locking Telegram closes it. You can also use Lock space to leave it yourself. Calls involving hidden chats end when the space closes.";
+"lng_leemen_tour_step2_title" = "2 of 4 · PIN and encrypted sync";
+"lng_leemen_tour_step2" = "Your Private Space PIN and privacy settings synchronize between linked Leemen clients. Maximum privacy adds a separate passphrase and recovery words. Save the recovery words before enabling it.";
+"lng_leemen_tour_step3_title" = "3 of 4 · Hidden chats and accounts";
+"lng_leemen_tour_step3" = "While inside Private Space, right-click a chat and choose Hide in Private Space. Manage accounts in Hidden accounts. The Messages visible outside Private Space view shows permitted messages. Messages sent there remain visible until you review them inside the space.";
+"lng_leemen_tour_step4_title" = "4 of 4 · Entry and privacy checks";
+"lng_leemen_tour_step4" = "Try your keyboard shortcut before hiding the visible entry. Review the screenshot setting and use Privacy check to inspect your Telegram cloud password and other sessions.";
+"lng_leemen_tour_device" = "Completion is remembered for this Telegram account on this device only.";
+"lng_leemen_tour_next" = "Next";
+"lng_leemen_tour_back" = "Back";
+"lng_leemen_tour_finish" = "Finish";
+"lng_leemen_tour_again" = "Replay the guide";
+"lng_leemen_tour_save_failed" = "Could not remember completion. Your privacy settings are unchanged. Try Finish again or close the guide.";

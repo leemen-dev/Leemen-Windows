@@ -27,10 +27,13 @@ struct JsonValue {
 	bool operator==(const JsonValue &) const = default;
 };
 
+enum class JsonBudget { Remote, LocalCheckpoint };
+
 struct JsonLimits {
 	std::size_t maxBytes = kMaxBlobPlaintextBytes;
 	std::size_t maxDepth = 64;
 	std::size_t maxNodes = 131072;
+	JsonBudget budget = JsonBudget::Remote;
 };
 
 struct JsonRead {

@@ -86,7 +86,9 @@ public:
 	void writeSessionSettings();
 	[[nodiscard]] bool writeLeemenSettingsSync();
 	void writeMtpData();
+	[[nodiscard]] bool writeMtpDataSync();
 	void writeMtpConfig();
+	[[nodiscard]] bool writeMtpConfigSync();
 
 	void registerDraftSource(
 		not_null<History*> history,

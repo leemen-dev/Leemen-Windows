@@ -27,6 +27,22 @@ struct PrivateAccountOwner {
 
 using PrivateAccountsSnapshot = std::map<AccountIdentity, PrivateAccountOwner>;
 
+struct PrivateAccountLogin {
+	AccountIdentity owner;
+	std::optional<AccountIdentity> completed;
+	bool cancelling = false;
+	bool operator==(const PrivateAccountLogin&) const = default;
+};
+
+using PrivateAccountLogins = std::map<std::uint32_t, PrivateAccountLogin>;
+
+struct PrivateAccountSlot {
+	std::optional<AccountIdentity> identity;
+	bool testEnvironment = false;
+};
+
+using PrivateAccountSlots = std::map<std::uint32_t, PrivateAccountSlot>;
+
 enum class HideAccountResult {
 	Changed,
 	Unchanged,
@@ -41,6 +57,14 @@ class PrivateAccountsState final {
 public:
 	[[nodiscard]] const PrivateAccountsSnapshot &snapshot() const;
 	[[nodiscard]] bool restore(PrivateAccountsSnapshot snapshot);
+	[[nodiscard]] const PrivateAccountLogins &logins() const;
+	[[nodiscard]] bool restoreLogins(PrivateAccountLogins logins);
+	[[nodiscard]] bool reconcileStartup(const PrivateAccountSlots &accounts);
+	[[nodiscard]] bool reserveLogin(std::uint32_t slot, AccountIdentity owner, bool premiumActive);
+	[[nodiscard]] bool completeLogin(std::uint32_t slot, AccountIdentity target);
+	void cancelLogin(std::uint32_t slot);
+	void releaseLogin(std::uint32_t slot);
+	[[nodiscard]] bool loginBlocks(std::uint32_t slot, AccountIdentity target) const;
 	[[nodiscard]] HideAccountResult setHidden(
 		AccountIdentity owner,
 		AccountIdentity target,
@@ -63,6 +87,7 @@ public:
 
 private:
 	PrivateAccountsSnapshot _owners;
+	PrivateAccountLogins _logins;
 };
 
 [[nodiscard]] bool ValidAccountIdentity(AccountIdentity identity);

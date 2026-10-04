@@ -38,6 +38,7 @@ struct SyncCheckpoint {
 	std::optional<PinRegister> authorizedPin;
 	std::int64_t filterVersionFloor = 0;
 	std::int64_t contentVersionFloor = 0;
+	std::optional<SyncPair> confirmed = std::nullopt;
 };
 
 struct SyncRequest {
@@ -61,6 +62,7 @@ public:
 	[[nodiscard]] SyncPhase phase() const;
 	[[nodiscard]] SyncFailure failure() const;
 	[[nodiscard]] const SyncPair *projection() const;
+	[[nodiscard]] const SyncPair *cachedProjection() const;
 	[[nodiscard]] const SyncPair *pendingMutation() const;
 	[[nodiscard]] SyncCheckpoint checkpoint() const;
 	bool restoreCheckpoint(SyncCheckpoint checkpoint);
@@ -77,6 +79,7 @@ public:
 		std::int64_t version = 0);
 	void close();
 	void discardPendingMutation();
+	void discardCachedProjection();
 
 private:
 	[[nodiscard]] std::vector<SyncRequest> readPair();
@@ -89,6 +92,7 @@ private:
 	SyncFailure _failure = SyncFailure::None;
 	SyncPair _remote;
 	std::optional<SyncPair> _pending;
+	std::optional<SyncPair> _confirmed;
 	std::optional<PinRegister> _authorizedPin;
 	std::optional<RemoteRead> _filterRead;
 	std::optional<RemoteRead> _contentRead;

@@ -104,6 +104,7 @@ public:
 	[[nodiscard]] std::optional<std::int64_t> metadataReceivedAt() const;
 	[[nodiscard]] Security::PremiumSnapshot premium() const;
 	[[nodiscard]] const Sync::SyncPair *projection() const;
+	[[nodiscard]] const Sync::SyncPair *cachedProjection() const;
 	[[nodiscard]] const Sync::SyncPair *pendingMutation() const;
 	[[nodiscard]] rpl::producer<> changes() const;
 	[[nodiscard]] QByteArray serialize() const;

@@ -93,6 +93,10 @@ void RestoreShell::showUnavailable() {
 	_content->update();
 }
 
+void RestoreShell::hide() {
+	_window->hide();
+}
+
 void RestoreShell::close() {
 	_window->close();
 }

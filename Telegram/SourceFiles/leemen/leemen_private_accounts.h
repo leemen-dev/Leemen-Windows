@@ -28,7 +28,19 @@ public:
 	[[nodiscard]] QByteArray serialize() const;
 	[[nodiscard]] bool damaged() const;
 	[[nodiscard]] bool configured() const;
-	[[nodiscard]] bool startupAllowed(std::span<const std::uint64_t> identities) const;
+	[[nodiscard]] bool startupAllowed(const PrivateAccountSlots &accounts);
+	[[nodiscard]] bool reserved(not_null<Main::Account*> account) const;
+	[[nodiscard]] bool loginCancelling(not_null<Main::Account*> account) const;
+	[[nodiscard]] bool pendingLogin(not_null<Main::Session*> owner, not_null<Main::Account*> account) const;
+	bool beginLogin(not_null<Main::Session*> owner);
+	bool resumeLogin(not_null<Main::Session*> owner, not_null<Main::Account*> account);
+	bool cancelLogin(not_null<Main::Session*> owner, not_null<Main::Account*> account);
+	bool reserveLogin(not_null<Main::Session*> owner, not_null<Main::Account*> account);
+	bool persistNewLogin(not_null<Main::Account*> account);
+	void completeLogin(not_null<Main::Account*> account, not_null<Main::Session*> session);
+	void loginLoggedOut(not_null<Main::Account*> account);
+	bool redirectDuplicateLogin(not_null<Main::Account*> account);
+	bool releaseRemovedLogin(int slot);
 	[[nodiscard]] bool hidden(not_null<Main::Account*> account) const;
 	[[nodiscard]] int hiddenCount(not_null<Main::Session*> owner) const;
 	[[nodiscard]] int unavailableHiddenCount(not_null<Main::Session*> owner) const;
@@ -51,6 +63,8 @@ public:
 private:
 	[[nodiscard]] bool managementAllowed(not_null<Main::Session*> owner) const;
 	[[nodiscard]] Main::Account *accountFor(AccountIdentity identity) const;
+	[[nodiscard]] Main::Account *accountAt(int slot) const;
+	void returnFromLogin(AccountIdentity owner);
 	bool persist();
 	void persistenceFailed();
 	void notify();
@@ -66,6 +80,7 @@ private:
 	bool _notifying = false;
 	std::optional<AccountIdentity> _grant;
 	std::optional<AccountIdentity> _returnTo;
+	std::optional<int> _loginSlot;
 	std::uint64_t _epoch = 0;
 	std::uint64_t _operation = 0;
 	std::uint64_t _nextOperation = 0;

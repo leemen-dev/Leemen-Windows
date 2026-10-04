@@ -315,6 +315,10 @@ bool PlaybackControls::hasTimestamps() const {
 	return _timestampLabel != nullptr;
 }
 
+void PlaybackControls::setPictureInPictureAllowed(bool allowed) {
+	_pictureInPicture->setEnabled(allowed);
+}
+
 auto PlaybackControls::nextTimestamp(float64 progress) const
 -> std::optional<TimestampData> {
 	for (const auto &ts : _timestamps) {

@@ -77,12 +77,17 @@ const SyncPair *SyncCoordinator::projection() const {
 	return (_phase == SyncPhase::Ready) ? &_remote : nullptr;
 }
 
+const SyncPair *SyncCoordinator::cachedProjection() const {
+	return (_confirmed && (!_pending || CanRetainTrustedProjection(*_confirmed, *_pending)))
+		? &*_confirmed : nullptr;
+}
+
 const SyncPair *SyncCoordinator::pendingMutation() const {
 	return _pending ? &*_pending : nullptr;
 }
 
 SyncCheckpoint SyncCoordinator::checkpoint() const {
-	return { _pending, _authorizedPin, _filterVersionFloor, _contentVersionFloor };
+	return { _pending, _authorizedPin, _filterVersionFloor, _contentVersionFloor, _confirmed };
 }
 
 bool SyncCoordinator::restoreCheckpoint(SyncCheckpoint checkpoint) {
@@ -110,7 +115,17 @@ bool SyncCoordinator::restoreCheckpoint(SyncCheckpoint checkpoint) {
 		checkpoint.filterVersionFloor = std::max(checkpoint.filterVersionFloor, pair.filterVersion);
 		checkpoint.contentVersionFloor = std::max(checkpoint.contentVersionFloor, pair.contentVersion);
 	}
+	if (checkpoint.confirmed) {
+		const auto &pair = *checkpoint.confirmed;
+		if (pair.filterVersion < 0 || pair.filterVersion > checkpoint.filterVersionFloor
+			|| pair.contentVersion < 0 || pair.contentVersion > checkpoint.contentVersionFloor
+			|| !EncodeFilterBlob(pair.filter) || !EncodeContentBlob(pair.content)) {
+			block(SyncFailure::InvalidData);
+			return false;
+		}
+	}
 	_pending = std::move(checkpoint.pending);
+	_confirmed = std::move(checkpoint.confirmed);
 	_authorizedPin = std::move(checkpoint.authorizedPin);
 	_filterVersionFloor = checkpoint.filterVersionFloor;
 	_contentVersionFloor = checkpoint.contentVersionFloor;
@@ -242,6 +257,7 @@ std::vector<SyncRequest> SyncCoordinator::reconcile() {
 	_contentRead.reset();
 	if (!_pending) {
 		RecomputeOffModeVisible(_remote.filter, _remote.content);
+		_confirmed = _remote;
 		_phase = SyncPhase::Ready;
 		return {};
 	}
@@ -275,6 +291,7 @@ std::vector<SyncRequest> SyncCoordinator::nextWrite() {
 		_pending.reset();
 		_authorizedPin.reset();
 		_phase = SyncPhase::Ready;
+		_confirmed = _remote;
 		return {};
 	}
 	const auto kind = _writeOrder.front();
@@ -337,6 +354,9 @@ void SyncCoordinator::block(SyncFailure failure) {
 	_filterRead.reset();
 	_contentRead.reset();
 	_writeOrder.clear();
+	if (failure != SyncFailure::None && failure != SyncFailure::Transport) {
+		_confirmed.reset();
+	}
 }
 
 void SyncCoordinator::close() {
@@ -344,6 +364,7 @@ void SyncCoordinator::close() {
 	_phase = SyncPhase::Closed;
 	_remote = SyncPair();
 	_pending.reset();
+	_confirmed.reset();
 	_authorizedPin.reset();
 	_filterVersionFloor = 0;
 	_contentVersionFloor = 0;
@@ -352,7 +373,12 @@ void SyncCoordinator::close() {
 void SyncCoordinator::discardPendingMutation() {
 	_pending.reset();
 	_authorizedPin.reset();
+	_confirmed.reset();
 	block(SyncFailure::None);
+}
+
+void SyncCoordinator::discardCachedProjection() {
+	_confirmed.reset();
 }
 
 } // namespace Leemen::Sync

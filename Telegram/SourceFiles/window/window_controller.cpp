@@ -149,7 +149,8 @@ void Controller::showAccount(
 
 	const auto prevAccount = _id.account;
 	const auto prevSession = maybeSession();
-	const auto hidePreviousContent = prevSession && !Leemen::PrivateAccountContentAllowed(prevSession);
+	const auto hidePreviousContent = (prevAccount && prevAccount->domain().privateAccounts().hidden(prevAccount))
+		|| (prevSession && !Leemen::PrivateAccountContentAllowed(prevSession));
 	const auto prevSessionUniqueId = prevSession
 		? prevSession->uniqueId()
 		: 0;
@@ -174,7 +175,7 @@ void Controller::showAccount(
 	_id.account->sessionValue(
 	) | rpl::on_next([=, wasPrivateAccount = false](Main::Session *session) mutable {
 		const auto suppressCache = hidePreviousContent || wasPrivateAccount;
-		wasPrivateAccount = session && session->domain().privateAccounts().hidden(&session->account());
+		wasPrivateAccount = account->domain().privateAccounts().hidden(account);
 		const auto was = base::take(_sessionController);
 		if (session && !Leemen::PrivateAccountContentAllowed(session)) {
 			_sessionControllerValue = nullptr;

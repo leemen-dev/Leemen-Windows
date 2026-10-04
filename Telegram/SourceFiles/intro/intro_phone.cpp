@@ -20,6 +20,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "main/main_domain.h"
 #include "main/main_app_config.h"
 #include "main/main_session.h"
+#include "leemen/leemen_private_accounts.h"
 #include "data/data_user.h"
 #include "ui/boxes/confirm_box.h"
 #include "boxes/abstract_box.h"
@@ -186,9 +187,11 @@ void PhoneWidget::submit() {
 	const auto phoneDigits = DigitsOnly(phone);
 	for (const auto &[index, existing] : Core::App().domain().accounts()) {
 		const auto raw = existing.get();
+		if (!Leemen::PrivateAccountVisibleFrom(&account(), raw)) continue;
 		if (const auto session = raw->maybeSession()) {
 			if (raw->mtp().environment() == account().mtp().environment()
 				&& DigitsOnly(session->user()->phone()) == phoneDigits) {
+				if (account().domain().privateAccounts().redirectDuplicateLogin(&account())) return;
 				crl::on_main(raw, [=] {
 					Core::App().domain().activate(raw);
 				});

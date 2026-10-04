@@ -7,7 +7,7 @@
 namespace Leemen {
 namespace {
 
-constexpr auto kMagic = std::array<unsigned char, 4>{ 'L', 'A', 'C', 1 };
+constexpr auto kMagic = std::array<unsigned char, 4>{ 'L', 'A', 'C', 2 };
 
 std::set<AccountIdentity> Identities(const PrivateAccountsSnapshot &snapshot) {
 	auto result = std::set<AccountIdentity>();
@@ -45,6 +45,23 @@ bool ValidSnapshot(const PrivateAccountsSnapshot &snapshot) {
 		}
 	}
 	return Identities(snapshot).size() <= kMaxPrivateAccounts;
+}
+
+bool ValidLogins(const PrivateAccountsSnapshot &snapshot, const PrivateAccountLogins &logins) {
+	if (logins.size() > kMaxPrivateAccounts) return false;
+	auto identities = Identities(snapshot);
+	auto completed = std::set<AccountIdentity>();
+	for (const auto &[slot, login] : logins) {
+		if (slot >= kMaxPrivateAccounts || !ValidAccountIdentity(login.owner)) return false;
+		identities.emplace(login.owner);
+		if (!login.completed) continue;
+		const auto i = snapshot.find(login.owner);
+		if (!ValidAccountIdentity(*login.completed) || *login.completed == login.owner
+			|| !completed.emplace(*login.completed).second
+			|| login.completed->testEnvironment != login.owner.testEnvironment
+			|| i == snapshot.end() || !i->second.hidden.contains(*login.completed)) return false;
+	}
+	return identities.size() <= kMaxPrivateAccounts;
 }
 
 void Put(std::vector<unsigned char> &bytes, std::uint64_t value, std::size_t size) {
@@ -99,9 +116,77 @@ const PrivateAccountsSnapshot &PrivateAccountsState::snapshot() const {
 }
 
 bool PrivateAccountsState::restore(PrivateAccountsSnapshot snapshot) {
-	if (!ValidSnapshot(snapshot)) return false;
+	if (!ValidSnapshot(snapshot) || !ValidLogins(snapshot, _logins)) return false;
 	_owners = std::move(snapshot);
 	return true;
+}
+
+const PrivateAccountLogins &PrivateAccountsState::logins() const {
+	return _logins;
+}
+
+bool PrivateAccountsState::restoreLogins(PrivateAccountLogins logins) {
+	if (!ValidLogins(_owners, logins)) return false;
+	_logins = std::move(logins);
+	return true;
+}
+
+bool PrivateAccountsState::reconcileStartup(const PrivateAccountSlots &accounts) {
+	auto identities = std::set<AccountIdentity>();
+	for (const auto &[slot, account] : accounts) {
+		if (slot >= kMaxPrivateAccounts || (account.identity
+			&& (!ValidAccountIdentity(*account.identity)
+				|| account.identity->testEnvironment != account.testEnvironment
+				|| !identities.emplace(*account.identity).second))) return false;
+	}
+	auto updated = *this;
+	for (const auto &[slot, login] : _logins) {
+		const auto i = accounts.find(slot);
+		if (i == accounts.end() || i->second.testEnvironment != login.owner.testEnvironment
+			|| (!login.cancelling && !identities.contains(login.owner))) return false;
+		const auto identity = i->second.identity;
+		if (identity && login.completed && login.completed != identity) return false;
+		if (identity && !login.cancelling && !updated.completeLogin(slot, *identity)) return false;
+	}
+	const auto safe = std::ranges::any_of(accounts, [&](const auto &entry) {
+		return !updated._logins.contains(entry.first)
+			&& (!entry.second.identity || !updated.isHiddenByAny(*entry.second.identity));
+	});
+	if (!safe) return false;
+	*this = std::move(updated);
+	return true;
+}
+
+bool PrivateAccountsState::reserveLogin(std::uint32_t slot, AccountIdentity owner, bool premiumActive) {
+	if (!premiumActive || _logins.contains(slot)) return false;
+	auto logins = _logins;
+	logins.emplace(slot, PrivateAccountLogin{ owner, std::nullopt });
+	return restoreLogins(std::move(logins));
+}
+
+bool PrivateAccountsState::completeLogin(std::uint32_t slot, AccountIdentity target) {
+	const auto i = _logins.find(slot);
+	if (i == _logins.end() || i->second.cancelling
+		|| target.testEnvironment != i->second.owner.testEnvironment) return false;
+	if (i->second.completed) return *i->second.completed == target;
+	if (std::ranges::any_of(_logins, [&](const auto &entry) { return entry.second.completed == target; })) return false;
+	const auto changed = setHidden(i->second.owner, target, true, true);
+	if (changed != HideAccountResult::Changed && changed != HideAccountResult::Unchanged) return false;
+	i->second.completed = target;
+	return true;
+}
+
+void PrivateAccountsState::releaseLogin(std::uint32_t slot) {
+	_logins.erase(slot);
+}
+
+void PrivateAccountsState::cancelLogin(std::uint32_t slot) {
+	if (const auto i = _logins.find(slot); i != _logins.end()) i->second.cancelling = true;
+}
+
+bool PrivateAccountsState::loginBlocks(std::uint32_t slot, AccountIdentity target) const {
+	const auto i = _logins.find(slot);
+	return i != _logins.end() && (i->second.cancelling || i->second.completed != target);
 }
 
 HideAccountResult PrivateAccountsState::setHidden(
@@ -119,6 +204,7 @@ HideAccountResult PrivateAccountsState::setHidden(
 		if (Reaches(_owners, target, owner, visited)) return HideAccountResult::WouldCycle;
 		if (ownsHiddenAccounts(target)) return HideAccountResult::TargetOwnsAccounts;
 		auto identities = Identities(_owners);
+		for (const auto &[slot, login] : _logins) identities.emplace(login.owner);
 		identities.emplace(owner);
 		identities.emplace(target);
 		if (identities.size() > kMaxPrivateAccounts) return HideAccountResult::Capacity;
@@ -127,6 +213,9 @@ HideAccountResult PrivateAccountsState::setHidden(
 		const auto i = _owners.find(owner);
 		i->second.hidden.erase(target);
 		if (i->second.hidden.empty() && !i->second.switchPin) _owners.erase(i);
+		std::erase_if(_logins, [&](const auto &entry) {
+			return entry.second.owner == owner && entry.second.completed == target;
+		});
 	}
 	return HideAccountResult::Changed;
 }
@@ -135,6 +224,7 @@ bool PrivateAccountsState::setSwitchPin(AccountIdentity owner, std::optional<Loc
 	if (!ValidAccountIdentity(owner)) return false;
 	if (pin) {
 		auto identities = Identities(_owners);
+		for (const auto &[slot, login] : _logins) identities.emplace(login.owner);
 		identities.emplace(owner);
 		if (identities.size() > kMaxPrivateAccounts) return false;
 		_owners[owner].switchPin = std::move(pin);
@@ -163,7 +253,8 @@ bool PrivateAccountsState::isHiddenByAny(AccountIdentity target) const {
 
 bool PrivateAccountsState::ownsHiddenAccounts(AccountIdentity owner) const {
 	const auto i = _owners.find(owner);
-	return i != _owners.end() && !i->second.hidden.empty();
+	return (i != _owners.end() && !i->second.hidden.empty())
+		|| std::ranges::any_of(_logins, [&](const auto &entry) { return entry.second.owner == owner; });
 }
 
 bool PrivateAccountsState::hiddenFrom(
@@ -205,6 +296,10 @@ std::vector<AccountIdentity> PrivateAccountsState::logoutClosure(AccountIdentity
 }
 
 void PrivateAccountsState::removeAccount(AccountIdentity account) {
+	std::erase_if(_logins, [&](const auto &entry) { return entry.second.completed == account; });
+	for (auto &[slot, login] : _logins) {
+		if (login.owner == account) { login.completed.reset(); login.cancelling = true; }
+	}
 	_owners.erase(account);
 	for (auto i = _owners.begin(); i != _owners.end();) {
 		i->second.hidden.erase(account);
@@ -226,12 +321,21 @@ std::vector<unsigned char> EncodePrivateAccounts(const PrivateAccountsState &sta
 		Put(result, value.hidden.size(), 2);
 		for (const auto child : value.hidden) PutIdentity(result, child);
 	}
+	Put(result, state.logins().size(), 2);
+	for (const auto &[slot, login] : state.logins()) {
+		Put(result, slot, 1);
+		PutIdentity(result, login.owner);
+		Put(result, (login.completed ? 1 : 0) | (login.cancelling ? 2 : 0), 1);
+		if (login.completed) PutIdentity(result, *login.completed);
+	}
 	return result;
 }
 
 std::optional<PrivateAccountsState> DecodePrivateAccounts(std::span<const unsigned char> bytes) {
 	if (bytes.size() < kMagic.size() || bytes.size() > kMaxPrivateAccountsBytes
-		|| !std::ranges::equal(bytes.first(kMagic.size()), kMagic)) return std::nullopt;
+		|| !std::ranges::equal(bytes.first(3), std::span(kMagic).first(3))
+		|| (bytes[3] != 1 && bytes[3] != 2)) return std::nullopt;
+	const auto version = bytes[3];
 	auto reader = Reader(bytes.subspan(kMagic.size()));
 	const auto count = reader.integer(2);
 	if (!count || *count > kMaxPrivateAccounts) return std::nullopt;
@@ -253,9 +357,27 @@ std::optional<PrivateAccountsState> DecodePrivateAccounts(std::span<const unsign
 		}
 		if (!snapshot.emplace(*owner, std::move(value)).second) return std::nullopt;
 	}
+	auto logins = PrivateAccountLogins();
+	if (version >= 2) {
+		const auto count = reader.integer(2);
+		if (!count || *count > kMaxPrivateAccounts) return std::nullopt;
+		for (auto index = std::uint64_t(0); index != *count; ++index) {
+			const auto slot = reader.integer(1);
+			const auto owner = reader.identity();
+			const auto complete = reader.integer(1);
+			if (!slot || *slot >= kMaxPrivateAccounts || !owner || !complete || *complete > 3) return std::nullopt;
+			auto login = PrivateAccountLogin{ *owner, std::nullopt, (*complete & 2) != 0 };
+			if (*complete & 1) {
+				login.completed = reader.identity();
+				if (!login.completed) return std::nullopt;
+			}
+			if (!logins.emplace(std::uint32_t(*slot), login).second) return std::nullopt;
+		}
+	}
 	if (!reader.done()) return std::nullopt;
 	auto result = PrivateAccountsState();
-	return result.restore(std::move(snapshot)) ? std::make_optional(std::move(result)) : std::nullopt;
+	return result.restore(std::move(snapshot)) && result.restoreLogins(std::move(logins))
+		? std::make_optional(std::move(result)) : std::nullopt;
 }
 
 } // namespace Leemen

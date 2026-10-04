@@ -249,6 +249,58 @@ void NonVisibilityMutations() {
 	Check(!CanRetainTrustedProjection(trusted, unsafe), "future per-chat semantics retained in comparison");
 }
 
+void OfflineConfirmedBaseline() {
+	auto sync = EmptyReady();
+	Check(sync.cachedProjection() && sync.projection(), "complete remote read establishes a confirmed baseline");
+	auto restarted = SyncCoordinator();
+	Check(restarted.restoreCheckpoint(sync.checkpoint()), "confirmed empty baseline survives restart");
+	Check(restarted.cachedProjection() && !restarted.projection(), "cached membership grants no fresh pair authority");
+	Check(restarted.submit(FilterBlob(), ContentBlob()).empty(), "cache alone cannot submit stale writes");
+	auto reads = restarted.pull();
+	Check(restarted.acceptRead(reads[0].id, { RemoteReadStatus::Failed, 0, {} }).empty(),
+		"offline refresh emits no writes");
+	Check(restarted.failure() == SyncFailure::Transport && restarted.cachedProjection(),
+		"network outage preserves confirmed ordinary-chat membership");
+	reads = restarted.pull();
+	Check(restarted.acceptRead(reads[0].id, Present(FilterBlob(), 1)).empty(), "first refreshed half is not a new baseline");
+	Check(restarted.cachedProjection()->filterVersion == 0, "partial read preserves previous full pair");
+	Check(restarted.acceptRead(reads[1].id, { RemoteReadStatus::Present, 1, "{}" }).empty(),
+		"malformed fresh content never restores remote authority");
+	Check(!restarted.cachedProjection() && !restarted.checkpoint().confirmed,
+		"malformed remote pair durably invalidates offline fallback");
+	reads = SubmitHide(sync);
+	Check(!sync.cachedProjection(), "pending membership change closes cached fallback");
+	Check(sync.acceptRead(reads[0].id, Absent()).empty(), "membership write validates current filter");
+	auto writes = sync.acceptRead(reads[1].id, Absent());
+	writes = sync.acceptWrite(writes[0].id, RemoteWriteStatus::Accepted, 1);
+	Check(writes.size() == 1 && !sync.cachedProjection(), "partially acknowledged hide does not trust old membership");
+	Check(sync.checkpoint().confirmed && sync.checkpoint().confirmed->contentVersion == 0
+		&& sync.checkpoint().contentVersionFloor == 1, "partial commit keeps baseline distinct from durable floors");
+	Check(sync.acceptWrite(writes[0].id, RemoteWriteStatus::Accepted, 1).empty(), "full acknowledgement completes hide");
+	Check(sync.cachedProjection() && sync.cachedProjection()->filter.hiddenChatIds.contains("42"),
+		"fully acknowledged write replaces confirmed baseline");
+	Check(restarted.restoreCheckpoint(sync.checkpoint()), "nonempty confirmed pair restores closed");
+	auto filter = sync.projection()->filter;
+	auto content = sync.projection()->content;
+	Check(NextLamport(filter, content).has_value(), "harmless search mutation has a new clock");
+	content.privateSearchDialogIds["42"] = { "present", content.lamport, "windows", {} };
+	Check(!sync.submit(filter, content).empty(), "harmless search mutation starts reconciliation");
+	Check(sync.cachedProjection(), "nonvisibility pending mutation retains membership cache");
+	Check(restarted.restoreCheckpoint(sync.checkpoint()) && restarted.cachedProjection(),
+		"harmless pending mutation retains cached fallback after restart");
+	sync.discardPendingMutation();
+	Check(!sync.cachedProjection() && !sync.checkpoint().confirmed, "discarding an uncertain queue requires a fresh baseline");
+	restarted.discardCachedProjection();
+	Check(!restarted.cachedProjection() && restarted.pendingMutation(), "hard runtime invalidation clears cache without discarding user intent");
+	auto corrupt = restarted.checkpoint();
+	corrupt.confirmed = SyncPair();
+	corrupt.confirmed->filterVersion = corrupt.filterVersionFloor + 1;
+	Check(!restarted.restoreCheckpoint(corrupt) && !restarted.cachedProjection(),
+		"baseline ahead of observed version floors is rejected");
+	sync.close();
+	Check(!sync.cachedProjection() && !sync.checkpoint().confirmed, "confirmed reset cleanup wipes baseline");
+}
+
 } // namespace
 
 int main() {
@@ -260,5 +312,6 @@ int main() {
 	CrashRecovery();
 	RemoteResetCannotResurrectState();
 	NonVisibilityMutations();
+	OfflineConfirmedBaseline();
 	std::cout << Checks << " sync coordinator checks passed\n";
 }

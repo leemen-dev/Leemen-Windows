@@ -215,7 +215,7 @@ Domain::StartModernResult Domain::startModern(
 		std::unique_ptr<MTP::Config> config;
 	};
 	auto prepared = std::vector<PreparedAccount>();
-	auto identities = std::vector<std::uint64_t>();
+	auto identities = Leemen::PrivateAccountSlots();
 	auto active = 0;
 	for (auto i = 0; i != count; ++i) {
 		const auto index = indices[i];
@@ -229,14 +229,18 @@ Domain::StartModernResult Domain::startModern(
 			auto config = account->prepareToStart(_localKey);
 			const auto sessionId = account->willHaveSessionUniqueId(
 				config.get());
-			if (!sessions.contains(sessionId)
+			if ((!sessionId || !sessions.contains(sessionId))
 				&& (sessionId || (sessions.empty() && i + 1 == count)
 					|| _owner->privateAccounts().configured())) {
 				if (sessions.empty()) {
 					active = index;
 				}
+				const auto test = config && config->isTestMode();
+				const auto identity = sessionId
+					? std::make_optional(Leemen::AccountIdentity{ sessionId & ~0x0100'0000'0000'0000ULL, test })
+					: std::nullopt;
+				identities.emplace(std::uint32_t(index), Leemen::PrivateAccountSlot{ identity, test });
 				prepared.push_back({ index, std::move(account), std::move(config) });
-				identities.push_back(sessionId);
 				sessions.emplace(sessionId);
 			}
 		}
@@ -249,6 +253,16 @@ Domain::StartModernResult Domain::startModern(
 	if (!_owner->privateAccounts().startupAllowed(identities)) {
 		_owner->privateAccounts().blockCorruptedStartup();
 		return StartModernResult::CorruptPrivateAccounts;
+	}
+	const auto protection = _owner->privateAccounts().serialize();
+	if (_owner->privateAccounts().configured() && protection != privateAccounts) {
+		auto preparedIndices = std::vector<int>();
+		for (const auto &entry : prepared) preparedIndices.push_back(entry.index);
+		writeAccountsSnapshot(preparedIndices, selected.value_or(active), protection, true);
+		if (!verifyPrivateAccounts(protection)) {
+			_owner->privateAccounts().blockCorruptedStartup();
+			return StartModernResult::CorruptPrivateAccounts;
+		}
 	}
 	for (auto &entry : prepared) {
 		entry.account->start(std::move(entry.config));
@@ -264,6 +278,16 @@ Domain::StartModernResult Domain::startModern(
 
 void Domain::writeAccounts(bool sync) {
 	Expects(!_owner->accounts().empty());
+	auto indices = std::vector<int>();
+	for (const auto &[index, account] : _owner->accounts()) indices.push_back(index);
+	writeAccountsSnapshot(indices, _owner->activeForStorage(), _owner->privateAccounts().serialize(), sync);
+}
+
+void Domain::writeAccountsSnapshot(
+		const std::vector<int> &indices,
+		int active,
+		const QByteArray &privateAccounts,
+		bool sync) {
 
 	const auto path = BaseGlobalPath();
 	if (!QDir().exists(path)) {
@@ -274,22 +298,24 @@ void Domain::writeAccounts(bool sync) {
 	key.writeData(_passcodeKeySalt);
 	key.writeData(_passcodeKeyEncrypted);
 
-	const auto &list = _owner->accounts();
-
-	auto keySize = sizeof(qint32) + sizeof(qint32) * list.size();
+	auto keySize = sizeof(qint32) + sizeof(qint32) * indices.size();
 
 	EncryptedDescriptor keyData(keySize);
-	keyData.stream << qint32(list.size());
-	for (const auto &[index, account] : list) {
+	keyData.stream << qint32(indices.size());
+	for (const auto index : indices) {
 		keyData.stream << qint32(index);
 	}
-	keyData.stream << qint32(_owner->activeForStorage());
-	keyData.stream << _owner->privateAccounts().serialize();
+	keyData.stream << qint32(active);
+	keyData.stream << privateAccounts;
 	key.writeEncrypted(keyData, _localKey);
 }
 
 bool Domain::writePrivateAccountsSync(const QByteArray &expected) {
 	writeAccounts(true);
+	return verifyPrivateAccounts(expected);
+}
+
+bool Domain::verifyPrivateAccounts(const QByteArray &expected) {
 	auto file = FileReadDescriptor();
 	if (!ReadFile(file, ComputeKeyName(_dataName), BaseGlobalPath())) return false;
 	auto salt = QByteArray();

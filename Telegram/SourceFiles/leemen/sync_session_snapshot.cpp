@@ -5,7 +5,8 @@
 namespace Leemen::Sync {
 namespace {
 
-constexpr auto kSnapshotLimits = JsonLimits{ 1024 * 1024, 64, 131072 };
+constexpr auto kSnapshotLimits = JsonLimits{
+	2 * 1024 * 1024, 68, 524288, JsonBudget::LocalCheckpoint };
 
 const JsonValue *Field(const JsonValue &value, const char *key) {
 	const auto object = std::get_if<JsonValue::Object>(&value.value);
@@ -32,19 +33,57 @@ bool ValidFingerprint(const std::string &value) {
 	});
 }
 
+std::optional<JsonValue> EncodedPair(const SyncPair &pair) {
+	const auto filter = EncodeFilterBlob(pair.filter);
+	const auto content = EncodeContentBlob(pair.content);
+	if (!filter || !content) {
+		return std::nullopt;
+	}
+	return JsonValue{ JsonValue::Object{
+		{ "filter", *ParseJson(*filter).value },
+		{ "content", *ParseJson(*content).value },
+		{ "filter_version", Number(pair.filterVersion) },
+		{ "content_version", Number(pair.contentVersion) },
+	} };
+}
+
+std::optional<SyncPair> DecodedPair(const JsonValue &value) {
+	const auto filter = Field(value, "filter");
+	const auto content = Field(value, "content");
+	const auto filterVersion = Field(value, "filter_version");
+	const auto contentVersion = Field(value, "content_version");
+	if (!filter || !content || !filterVersion || !contentVersion) {
+		return std::nullopt;
+	}
+	const auto f = EncodeJson(*filter);
+	const auto c = EncodeJson(*content);
+	const auto fv = ExactInt64(*filterVersion);
+	const auto cv = ExactInt64(*contentVersion);
+	if (!f || !c || !fv || !cv) {
+		return std::nullopt;
+	}
+	auto decodedFilter = ReadFilterBlob(*f);
+	auto decodedContent = ReadContentBlob(*c);
+	return (decodedFilter.blob && decodedContent.blob)
+		? std::make_optional(SyncPair{ std::move(*decodedFilter.blob),
+			std::move(*decodedContent.blob), *fv, *cv }) : std::nullopt;
+}
+
 bool Valid(const SessionSnapshot &snapshot) {
 	auto coordinator = SyncCoordinator();
 	return snapshot.telegramUserId
 		&& Backend::CanonicalUuid(snapshot.generation.masterAccountId)
 		&& Backend::CanonicalUuid(snapshot.generation.syncAccountId)
 		&& (!snapshot.keyFingerprint || ValidFingerprint(*snapshot.keyFingerprint))
-		&& ((!snapshot.checkpoint.pending
+		&& ((!snapshot.checkpoint.pending && !snapshot.checkpoint.confirmed
 			&& !snapshot.checkpoint.filterVersionFloor
 			&& !snapshot.checkpoint.contentVersionFloor) || snapshot.keyFingerprint)
 		&& (snapshot.reset == LocalResetState::None
 			|| snapshot.reset == LocalResetState::Pending
 			|| snapshot.reset == LocalResetState::Confirmed)
 		&& (!snapshot.accountDeletePending || snapshot.reset != LocalResetState::Confirmed)
+		&& (!snapshot.checkpoint.confirmed || (snapshot.reset == LocalResetState::None
+			&& !snapshot.accountDeletePending))
 		&& coordinator.restoreCheckpoint(snapshot.checkpoint);
 }
 
@@ -56,7 +95,7 @@ std::optional<std::string> EncodeSessionSnapshot(const SessionSnapshot &snapshot
 	}
 	const auto &checkpoint = snapshot.checkpoint;
 	auto object = JsonValue::Object{
-		{ "version", Number(1) },
+		{ "version", Number(2) },
 		{ "telegram_user_id", JsonValue{ std::to_string(snapshot.telegramUserId) } },
 		{ "master_account_id", JsonValue{ *Backend::CanonicalUuid(snapshot.generation.masterAccountId) } },
 		{ "sync_account_id", JsonValue{ *Backend::CanonicalUuid(snapshot.generation.syncAccountId) } },
@@ -76,22 +115,23 @@ std::optional<std::string> EncodeSessionSnapshot(const SessionSnapshot &snapshot
 	if (snapshot.accountDeletePending) {
 		object.emplace("account_delete", JsonValue{ std::string("pending") });
 	}
+	if (checkpoint.confirmed) {
+		auto confirmed = EncodedPair(*checkpoint.confirmed);
+		if (!confirmed) {
+			return std::nullopt;
+		}
+		object.emplace("confirmed", std::move(*confirmed));
+	}
 	if (checkpoint.pending) {
-		const auto filter = EncodeFilterBlob(checkpoint.pending->filter);
-		const auto content = EncodeContentBlob(checkpoint.pending->content);
+		auto pending = EncodedPair(*checkpoint.pending);
 		auto authorized = ContentBlob();
 		authorized.pin = checkpoint.authorizedPin;
 		const auto pin = EncodeContentBlob(authorized);
-		if (!filter || !content || !pin) {
+		if (!pending || !pin) {
 			return std::nullopt;
 		}
-		object.emplace("pending", JsonValue{ JsonValue::Object{
-			{ "filter", *ParseJson(*filter).value },
-			{ "content", *ParseJson(*content).value },
-			{ "filter_version", Number(checkpoint.pending->filterVersion) },
-			{ "content_version", Number(checkpoint.pending->contentVersion) },
-			{ "authorized", *ParseJson(*pin).value },
-		} });
+		std::get<JsonValue::Object>(pending->value).emplace("authorized", *ParseJson(*pin).value);
+		object.emplace("pending", std::move(*pending));
 	}
 	return EncodeJson(JsonValue{ std::move(object) }, kSnapshotLimits);
 }
@@ -113,7 +153,8 @@ std::optional<SessionSnapshot> ReadSessionSnapshot(
 	const auto fingerprint = StringField(value, "key_fingerprint");
 	const auto reset = StringField(value, "reset");
 	const auto deletion = StringField(value, "account_delete");
-	if (!version || ExactInt64(*version) != 1
+	const auto revision = version ? ExactInt64(*version) : std::nullopt;
+	if (!revision || (*revision != 1 && *revision != 2)
 		|| !telegram || *telegram != std::to_string(expectedTelegramUserId)
 		|| !master || !Backend::CanonicalUuid(*master)
 		|| !sync || !Backend::CanonicalUuid(*sync) || !maximum
@@ -129,6 +170,9 @@ std::optional<SessionSnapshot> ReadSessionSnapshot(
 	result.accountDeletePending = deletion.has_value();
 	const auto filterFloor = Field(value, "filter_version_floor");
 	const auto contentFloor = Field(value, "content_version_floor");
+	if (*revision == 2 && (!filterFloor || !contentFloor)) {
+		return std::nullopt;
+	}
 	if (filterFloor || contentFloor) {
 		const auto f = filterFloor ? ExactInt64(*filterFloor) : std::nullopt;
 		const auto c = contentFloor ? ExactInt64(*contentFloor) : std::nullopt;
@@ -139,34 +183,33 @@ std::optional<SessionSnapshot> ReadSessionSnapshot(
 		result.checkpoint.contentVersionFloor = *c;
 	}
 	if (const auto pending = Field(value, "pending")) {
-		const auto filter = Field(*pending, "filter");
-		const auto content = Field(*pending, "content");
-		const auto filterVersion = Field(*pending, "filter_version");
-		const auto contentVersion = Field(*pending, "content_version");
+		auto pair = DecodedPair(*pending);
 		const auto authorized = Field(*pending, "authorized");
-		if (!filter || !content || !filterVersion || !contentVersion || !authorized) {
+		if (!pair || !authorized) {
 			return std::nullopt;
 		}
-		const auto f = EncodeJson(*filter);
-		const auto c = EncodeJson(*content);
 		const auto a = EncodeJson(*authorized);
-		const auto fv = ExactInt64(*filterVersion);
-		const auto cv = ExactInt64(*contentVersion);
-		if (!f || !c || !a || !fv || !cv) {
+		if (!a) {
 			return std::nullopt;
 		}
-		auto decodedFilter = ReadFilterBlob(*f);
-		auto decodedContent = ReadContentBlob(*c);
 		auto decodedAuthorized = ReadContentBlob(*a);
-		if (!decodedFilter.blob || !decodedContent.blob || !decodedAuthorized.blob) {
+		if (!decodedAuthorized.blob) {
 			return std::nullopt;
 		}
-		result.checkpoint.pending = SyncPair{ std::move(*decodedFilter.blob),
-			std::move(*decodedContent.blob), *fv, *cv };
+		result.checkpoint.pending = std::move(pair);
 		result.checkpoint.authorizedPin = std::move(decodedAuthorized.blob->pin);
 		if (!filterFloor && !contentFloor) {
-			result.checkpoint.filterVersionFloor = *fv;
-			result.checkpoint.contentVersionFloor = *cv;
+			result.checkpoint.filterVersionFloor = result.checkpoint.pending->filterVersion;
+			result.checkpoint.contentVersionFloor = result.checkpoint.pending->contentVersion;
+		}
+	}
+	if (const auto confirmed = Field(value, "confirmed")) {
+		if (*revision != 2) {
+			return std::nullopt;
+		}
+		result.checkpoint.confirmed = DecodedPair(*confirmed);
+		if (!result.checkpoint.confirmed) {
+			return std::nullopt;
 		}
 	}
 	return Valid(result) ? std::make_optional(std::move(result)) : std::nullopt;

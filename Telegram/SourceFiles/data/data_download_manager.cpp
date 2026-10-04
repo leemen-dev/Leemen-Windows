@@ -708,7 +708,7 @@ void DownloadManager::finishFilesDelete(DeleteFilesDescriptor &&descriptor) {
 		const auto nested = ranges::lower_bound(retainedPaths, prefix);
 		const auto retained = ranges::binary_search(retainedPaths, path)
 			|| (!prefix.isEmpty()
-				&& nested != end(retainedPaths)
+				&& nested != retainedPaths.end()
 				&& nested->startsWith(prefix));
 		if (retained) {
 			i = descriptor.files.erase(i);

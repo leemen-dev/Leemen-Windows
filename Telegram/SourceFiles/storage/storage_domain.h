@@ -50,6 +50,8 @@ public:
 	[[nodiscard]] bool hasLocalPasscode() const;
 
 private:
+	void writeAccountsSnapshot(const std::vector<int> &indices, int active, const QByteArray &privateAccounts, bool sync);
+	[[nodiscard]] bool verifyPrivateAccounts(const QByteArray &expected);
 	enum class StartModernResult {
 		Success,
 		IncorrectPasscode,

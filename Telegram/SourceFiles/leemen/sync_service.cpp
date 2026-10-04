@@ -419,6 +419,12 @@ void SyncService::Data::cancel() {
 }
 
 bool SyncService::Data::publish(State next, Error problem) {
+	if (next == State::AccountDeleted || resetState != ResetState::None
+		|| accountDeletePending || consentStatus == ConsentStatus::Required
+		|| (problem != Error::None && problem != Error::Transport
+			&& problem != Error::InvalidPassphrase)) {
+		coordinator.discardCachedProjection();
+	}
 	state = next;
 	error = problem;
 	if (enabled && !token.bytes().empty() && state != State::AccountDeleted
@@ -947,7 +953,9 @@ void SyncService::Data::acceptMe(int status, const QByteArray &bytes) {
 			|| result.failure.kind == Backend::FailureKind::GenerationChanged) {
 			failure(result.failure);
 		} else {
-			failMe(Error::InvalidData);
+			failMe(result.failure.kind == Backend::FailureKind::Retryable
+				|| result.failure.kind == Backend::FailureKind::RateLimited
+				? Error::Transport : Error::InvalidData);
 		}
 		return;
 	}
@@ -1432,8 +1440,8 @@ void SyncService::Data::reconcileDowngrade() {
 				} else {
 					block(Error::GenerationChanged);
 				}
-			} else if (const auto key = std::get_if<Backend::MaximumPrivacyKey>(&*result.value)
-				; key && privacyOriginalWrap && SameMaximumKey(*key, *privacyOriginalWrap)) {
+			} else if (const auto maximum = std::get_if<Backend::MaximumPrivacyKey>(&*result.value)
+				; maximum && privacyOriginalWrap && SameMaximumKey(*maximum, *privacyOriginalWrap)) {
 				privacyFailed(Error::ConflictLimit);
 			} else {
 				masterKey.reset();
@@ -1857,9 +1865,9 @@ void SyncService::Data::prepareWrite(Sync::SyncRequest request) {
 					}
 					return;
 				}
-			} else if (const auto key = std::get_if<Backend::MaximumPrivacyKey>(
+			} else if (const auto maximum = std::get_if<Backend::MaximumPrivacyKey>(
 					&*result.value)) {
-				if (maximumMode && maximumKey && SameMaximumKey(*key, *maximumKey)) {
+				if (maximumMode && maximumKey && SameMaximumKey(*maximum, *maximumKey)) {
 					if (!canUnlockMaximum()) {
 						owner->lockMax();
 					} else {
@@ -2373,6 +2381,15 @@ const Sync::SyncPair *SyncService::projection() const {
 	return (!_data->accountDeletePending && _data->state == State::Ready && _data->resetState == ResetState::None
 		&& _data->consentStatus == ConsentStatus::Accepted && !_data->awaitingConsent)
 		? _data->coordinator.projection() : nullptr;
+}
+
+const Sync::SyncPair *SyncService::cachedProjection() const {
+	return (_data->generation && _data->masterFingerprint && !_data->accountDeletePending
+		&& _data->resetState == ResetState::None && _data->state != State::AccountDeleted
+		&& _data->consentStatus != ConsentStatus::Required
+		&& (_data->error == Error::None || _data->error == Error::Transport
+			|| _data->error == Error::InvalidPassphrase))
+		? _data->coordinator.cachedProjection() : nullptr;
 }
 
 const Sync::SyncPair *SyncService::pendingMutation() const {

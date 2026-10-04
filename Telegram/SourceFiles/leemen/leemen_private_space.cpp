@@ -170,7 +170,7 @@ bool PrivateSpace::hidden(PeerId peer) const {
 	};
 	if (!peer || ServicePeer(peer)) {
 		return false;
-	} else if (_damaged || (_syncEnabled && !_syncTrusted)
+	} else if (_damaged || (_syncEnabled && !_syncTrusted && !_syncCachedMembership)
 		|| direct(peer)) {
 		return true;
 	}
@@ -258,6 +258,30 @@ bool PrivateSpace::setScreenshotsAllowed(bool allowed) {
 	}
 	_changes.fire({});
 	return bool(weak);
+}
+
+bool PrivateSpace::onboardingCompleted() const {
+	return _session->settings().leemenOnboardingCompleted();
+}
+
+bool PrivateSpace::completeOnboarding() {
+	if (!active() || !managementAllowed() || !pinOperationAllowed()) {
+		return false;
+	}
+	auto &settings = _session->settings();
+	if (settings.leemenOnboardingCompleted()) {
+		return true;
+	}
+	const auto weak = base::make_weak(_session.get());
+	settings.setLeemenOnboardingCompleted(true);
+	const auto written = _session->local().writeLeemenSettingsSync();
+	if (!weak) {
+		return false;
+	}
+	if (!written) {
+		settings.setLeemenOnboardingCompleted(false);
+	}
+	return written;
 }
 
 bool PrivateSpace::unlockWithinGrace() {
@@ -731,6 +755,10 @@ void PrivateSpace::persistProtection() {
 	if (_session->local().writeLeemenSettingsSync()) {
 		return;
 	}
+	protectionPersistenceFailed();
+}
+
+void PrivateSpace::protectionPersistenceFailed() {
 	const auto weak = base::make_weak(_session.get());
 	_damaged = true;
 	_session->settings().markSessionSettingsReadFailed();

@@ -57,6 +57,8 @@ public:
 	[[nodiscard]] int retryAfterSeconds() const;
 	[[nodiscard]] int pinTimeoutMinutes() const;
 	[[nodiscard]] bool screenshotsAllowed() const;
+	[[nodiscard]] bool onboardingCompleted() const;
+	bool completeOnboarding();
 	[[nodiscard]] bool syncEnabled() const;
 	[[nodiscard]] bool needsPinSetup() const;
 	[[nodiscard]] bool usesSyncedPin() const;
@@ -78,6 +80,7 @@ private:
 	void read(const QByteArray &serialized);
 	void save();
 	void persistProtection();
+	void protectionPersistenceFailed();
 	void initPrivateMessages();
 	void reconcilePrivateMessages();
 	void invalidatePrivateMessageIntents();
@@ -130,8 +133,10 @@ private:
 	bool _allowScreenshots = true;
 	bool _syncEnabled = false;
 	bool _syncTrusted = false;
+	bool _syncCachedMembership = false;
 	bool _syncApplying = false;
 	bool _syncChangePending = false;
+	bool _syncForceTransition = false;
 	bool _syncDeletedLogoutScheduled = false;
 	std::optional<Sync::LocalIntentStamp> _syncDisableLocal;
 	std::uint64_t _syncImportUnlockRequest = 0;

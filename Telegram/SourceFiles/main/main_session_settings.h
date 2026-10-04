@@ -53,6 +53,13 @@ public:
 		_leemenSync = std::move(value);
 	}
 
+	[[nodiscard]] bool leemenOnboardingCompleted() const {
+		return _leemenOnboardingCompleted;
+	}
+	void setLeemenOnboardingCompleted(bool value) {
+		_leemenOnboardingCompleted = value;
+	}
+
 	void setSupportSwitch(Support::SwitchSettings value) {
 		_supportSwitch = value;
 	}
@@ -272,6 +279,7 @@ private:
 	QByteArray _leemenPrivateSpace;
 	QByteArray _leemenSync;
 	bool _sessionSettingsReadFailed = false;
+	bool _leemenOnboardingCompleted = false;
 
 };
 

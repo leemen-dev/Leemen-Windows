@@ -23,6 +23,8 @@
 namespace Leemen {
 namespace {
 
+constexpr auto kMaximumSavedSync = 4 * 1024 * 1024;
+
 std::span<const unsigned char> Bytes(const QByteArray &bytes) {
 	return { reinterpret_cast<const unsigned char*>(bytes.constData()),
 		std::size_t(bytes.size()) };
@@ -88,7 +90,7 @@ void PrivateSpace::startSync() {
 	_sync = std::make_unique<SyncService>(_session);
 	const auto &saved = _session->settings().leemenSync();
 	if (!saved.isEmpty()) {
-		if (saved.size() > 2 * 1024 * 1024) {
+		if (saved.size() > kMaximumSavedSync) {
 			_damaged = true;
 			return;
 		}
@@ -167,10 +169,15 @@ void PrivateSpace::saveSync() {
 	if (!_sync || _damaged) {
 		return;
 	}
+	const auto service = _sync->serialize();
+	if (_sync->linked() && service.isEmpty()) {
+		protectionPersistenceFailed();
+		return;
+	}
 	auto bytes = QByteArray();
 	auto stream = QDataStream(&bytes, QIODevice::WriteOnly);
 	stream.setVersion(QDataStream::Qt_5_1);
-	stream << qint32(3) << _syncDevice << _sync->serialize() << qint32(_failedAttempts)
+	stream << qint32(3) << _syncDevice << service << qint32(_failedAttempts)
 		<< qint32(_syncDisableLocal ? 1 : 0);
 	if (_syncDisableLocal) {
 		stream << qint64(_syncDisableLocal->clock)
@@ -180,6 +187,10 @@ void PrivateSpace::saveSync() {
 	for (const auto &[peer, stamp] : _syncLocalRemovals) {
 		stream << quint64(peer) << qint64(stamp.clock)
 			<< QString::fromStdString(stamp.device);
+	}
+	if (stream.status() != QDataStream::Ok || bytes.size() > kMaximumSavedSync) {
+		protectionPersistenceFailed();
+		return;
 	}
 	_session->settings().setLeemenSync(std::move(bytes));
 	persistProtection();
@@ -191,6 +202,21 @@ void PrivateSpace::syncChanged() {
 	}
 	if (_syncApplying) {
 		_syncChangePending = true;
+		const auto pending = _sync->pendingMutation();
+		const auto reading = _sync->state() == SyncService::State::Reading;
+		const auto writing = _sync->state() == SyncService::State::Writing;
+		const auto unchangedAccess = !pending || (_syncProjection
+			&& Sync::CanRetainTrustedProjection(*_syncProjection, *pending));
+		const auto retainsAccess = (reading || writing) && _syncTrusted && unchangedAccess;
+		if (!_sync->projection() && !retainsAccess
+			&& (_syncTrusted || _syncCachedMembership || _managementAuthorized || _state.active())) {
+			_syncTrusted = _syncCachedMembership = false;
+			_managementAuthorized = false;
+			_state.setActive(false);
+			_pinWindow.clear();
+			_syncForceTransition = true;
+			cancelPinOperation(_pendingPinRequest);
+		}
 		return;
 	}
 	_syncApplying = true;
@@ -201,6 +227,8 @@ void PrivateSpace::syncChanged() {
 		if (_damaged) _syncApplying = false;
 		return !_damaged;
 	};
+	const auto forceTransition = _syncForceTransition;
+	_syncForceTransition = false;
 	if (_sync->state() == SyncService::State::AccountDeleted
 		&& !_syncDeletedLogoutScheduled) {
 		_syncDeletedLogoutScheduled = true;
@@ -233,11 +261,12 @@ void PrivateSpace::syncChanged() {
 			_syncHidden.clear();
 			_syncProjection.reset();
 			_syncTrusted = false;
+			_syncCachedMembership = false;
 			_syncLocalRemovals.clear();
 			_syncDisableLocal.reset();
 			_syncImportUnlockRequest = 0;
 			save();
-		});
+		}, 0, forceTransition);
 		if (!canContinue()) {
 			if (done) {
 				done(false);
@@ -288,6 +317,17 @@ void PrivateSpace::syncChanged() {
 		&& Sync::CanRetainTrustedProjection(*_syncProjection, *pending));
 	const auto trusted = projected
 		|| ((reading || writing) && _syncTrusted && unchangedAccess);
+	const auto cached = _sync->cachedProjection();
+	auto cachedHidden = std::set<std::int64_t>();
+	if (cached && !trusted) {
+		for (const auto &[key, value] : cached->filter.hiddenChatIds) {
+			if (Sync::ProtectsMembership(value)) {
+				if (const auto id = Sync::ParseCanonicalPeerKey(key)) {
+					cachedHidden.emplace(*id);
+				}
+			}
+		}
+	}
 	if (active() && requiresLimitResolution()) {
 		transition([&] { _state.setActive(false); });
 		if (!canContinue()) return;
@@ -321,6 +361,8 @@ void PrivateSpace::syncChanged() {
 		const auto apply = [&] {
 			if (!_sync->projection() || _syncChangePending) {
 				_syncTrusted = false;
+				_syncCachedMembership = false;
+				_managementAuthorized = false;
 				_state.setActive(false);
 				_pinWindow.clear();
 				_syncChangePending = true;
@@ -350,6 +392,7 @@ void PrivateSpace::syncChanged() {
 			_syncProjection = *projected;
 			_syncHidden = std::move(hidden);
 			_syncTrusted = true;
+			_syncCachedMembership = false;
 			reconcilePrivateMessages();
 			if (!canContinue()) return;
 			_pinTimeoutMinutes = minutes;
@@ -365,23 +408,38 @@ void PrivateSpace::syncChanged() {
 				cancelPinOperation(_pendingPinRequest);
 			}
 		};
-		if (!_syncTrusted || hidden != _syncHidden || pinChanged) {
-			transition(apply);
+		if (forceTransition || !_syncTrusted || hidden != _syncHidden || pinChanged) {
+			transition(apply, 0, forceTransition);
 		} else {
 			apply();
 			if (!canContinue()) return;
 			_changes.fire({});
 		}
-	} else if (_syncTrusted != trusted) {
+	} else if (forceTransition || _syncTrusted != trusted
+		|| _syncCachedMembership != (cached != nullptr && !trusted)
+		|| (cached && !trusted && cachedHidden != _syncHidden)) {
 		transition([&] {
+			if (_syncChangePending || (cached && !_sync->cachedProjection())) {
+				_syncTrusted = false;
+				_syncCachedMembership = false;
+				_managementAuthorized = false;
+				_state.setActive(false);
+				_pinWindow.clear();
+				_syncChangePending = true;
+				return;
+			}
 			_syncTrusted = trusted;
+			_syncCachedMembership = cached != nullptr && !trusted;
+			if (_syncCachedMembership) {
+				_syncHidden = std::move(cachedHidden);
+			}
 			_managementAuthorized = false;
 			_state.setActive(false);
 			_pinWindow.clear();
 			if (!_syncImportUnlockRequest || _pendingPinRequest != _syncImportUnlockRequest) {
 				cancelPinOperation(_pendingPinRequest);
 			}
-		});
+		}, 0, true);
 	} else {
 		_changes.fire({});
 	}

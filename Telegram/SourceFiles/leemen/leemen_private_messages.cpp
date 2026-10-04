@@ -58,9 +58,10 @@ MessageState PrivateSpace::messageState(FullMsgId id) const {
 }
 
 bool PrivateSpace::allowsMessage(FullMsgId id, bool outgoingInFlight) const {
-	return ValidId(id) && messageStateReady()
-		&& (allowsPeer(id.peer) || outgoingInFlight
-			|| messageState(id) != MessageState::Hidden);
+	return ValidId(id) && !_damaged
+		&& (allowsPeer(id.peer)
+			|| (messageStateReady()
+				&& (outgoingInFlight || messageState(id) != MessageState::Hidden)));
 }
 
 std::vector<FullMsgId> PrivateSpace::publicMessages(PeerId peer) const {

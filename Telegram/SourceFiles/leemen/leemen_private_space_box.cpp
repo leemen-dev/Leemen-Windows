@@ -1,30 +1,36 @@
 #include "leemen/leemen_private_space_box.h"
 
 #include "base/weak_ptr.h"
+#include "core/application.h"
 #include "data/data_peer.h"
 #include "data/data_session.h"
 #include "lang/lang_keys.h"
-#include "leemen/leemen_private_space.h"
-#include "leemen/leemen_max_privacy_box.h"
-#include "leemen/leemen_entry_shortcut.h"
 #include "leemen/leemen_account_box.h"
+#include "leemen/leemen_entry_shortcut.h"
+#include "leemen/leemen_max_privacy_box.h"
+#include "leemen/leemen_onboarding_box.h"
 #include "leemen/leemen_privacy_actions_box.h"
 #include "leemen/leemen_privacy_warning_box.h"
+#include "leemen/leemen_private_accounts.h"
 #include "leemen/leemen_private_accounts_box.h"
-#include "leemen/sync_service.h"
+#include "leemen/leemen_private_space.h"
 #include "leemen/sync_peer_id.h"
+#include "leemen/sync_service.h"
+#include "main/main_account.h"
+#include "main/main_domain.h"
 #include "main/main_session.h"
 #include "ui/boxes/confirm_box.h"
-#include "ui/basic_click_handlers.h"
 #include "ui/layers/generic_box.h"
+#include "ui/widgets/fields/password_input.h"
 #include "ui/widgets/buttons.h"
 #include "ui/widgets/checkbox.h"
-#include "ui/widgets/fields/password_input.h"
 #include "ui/widgets/labels.h"
+#include "ui/basic_click_handlers.h"
 #include "window/window_session_controller.h"
 
 #include <crl/crl_on_main.h>
 #include <QtCore/QPointer>
+#include <QtGui/QGuiApplication>
 
 #include "styles/style_layers.h"
 #include "styles/style_widgets.h"
@@ -33,6 +39,15 @@ namespace Leemen {
 namespace {
 
 void SyncBox(not_null<Ui::GenericBox*> box, not_null<Window::SessionController*> controller);
+
+bool CurrentForegroundSession(not_null<Main::Session*> session) {
+	return session->domain().started()
+		&& &session->domain().active() == &session->account()
+		&& session->account().maybeSession() == session
+		&& PrivateAccountContentAllowed(session)
+		&& QGuiApplication::applicationState() == Qt::ApplicationActive
+		&& !Core::App().passcodeLocked();
+}
 
 not_null<Ui::PasswordInput*> AddPinInput(
 		not_null<Ui::GenericBox*> box,
@@ -66,6 +81,7 @@ void PinBox(
 	};
 	const auto session = &controller->session();
 	const auto weakController = base::make_weak(controller.get());
+	const auto weakBox = QPointer<Ui::GenericBox>(box.get());
 	const auto state = box->lifetime().make_state<State>();
 	const auto weakSession = base::make_weak(session);
 	const auto enrolled = session->leemen().configured();
@@ -123,17 +139,29 @@ void PinBox(
 			confirm->clear();
 			confirm->setEnabled(false);
 		}
-		auto done = crl::guard(box, [=](bool success) {
-			if (state->closing) {
+		auto done = [=](bool success) {
+			if (success) {
+				const auto navigate = !create || (weakBox && !state->closing);
+				if (weakBox) {
+					state->request = 0;
+					box->closeBox();
+				}
+				if (navigate && weakController && weakSession
+					&& &weakController->session() == weakSession.get()
+					&& CurrentForegroundSession(weakSession.get())
+					&& (create ? weakSession->leemen().configured()
+						: weakSession->leemen().managementAllowed())) {
+					ShowPrivateSpace(weakController.get());
+				}
+				return;
+			}
+			if (!weakBox || state->closing) {
 				return;
 			}
 			state->busy = false;
 			state->request = 0;
-			if (!weakSession || success) {
+			if (!weakSession) {
 				box->closeBox();
-				if (success && weakController && !create) {
-					ShowPrivateSpace(weakController.get());
-				}
 				return;
 			}
 			input->setEnabled(true);
@@ -147,13 +175,16 @@ void PinBox(
 					: tr::lng_leemen_pin_format(tr::now))
 				: tr::lng_leemen_pin_wrong(tr::now);
 			input->showError();
-		});
-		state->request = create
+		};
+		const auto request = create
 			? space.setPin(pin, std::move(done))
 			: space.unlock(pin, std::move(done));
 		pin.fill(QChar(0));
+		if (weakBox && !state->closing && state->busy) {
+			state->request = request;
+		}
 	};
-	box->addButton(create ? tr::lng_save() : tr::lng_leemen_unlock(), submit);
+	box->addButton(create ? tr::lng_settings_save() : tr::lng_leemen_unlock(), submit);
 	if (!create && session->leemen().syncEnabled()) {
 		const auto reset = box->addRow(object_ptr<Ui::LinkButton>(
 			box, tr::lng_leemen_reset(tr::now)));
@@ -202,6 +233,11 @@ QString SyncStatus(not_null<Main::Session*> session) {
 		return tr::lng_leemen_sync_passphrase_wrong(tr::now);
 	}
 	using State = SyncService::State;
+	if (sync.state() == State::Blocked
+		&& sync.error() == SyncService::Error::Transport
+		&& sync.cachedProjection()) {
+		return tr::lng_leemen_sync_cached(tr::now);
+	}
 	switch (sync.state()) {
 	case State::Idle: return tr::lng_leemen_sync_idle(tr::now);
 	case State::Authorizing: return tr::lng_leemen_sync_auth(tr::now);
@@ -373,7 +409,7 @@ void PinTimeoutBox(
 				? tr::lng_minutes(tr::now, lt_count, minutes)
 				: tr::lng_leemen_pin_always(tr::now)));
 	}
-	box->addButton(tr::lng_save(), [=] {
+	box->addButton(tr::lng_settings_save(), [=] {
 		if (weak && weak->leemen().active()) {
 			weak->leemen().setPinTimeoutMinutes(group->current());
 		}
@@ -509,6 +545,13 @@ void ManageBox(
 			ShowPrivateSpaceWarnings(controller);
 		}
 	});
+	const auto guide = box->addRow(object_ptr<Ui::LinkButton>(
+		box, tr::lng_leemen_tour_again(tr::now)));
+	guide->setClickedCallback([=] {
+		if (weak) {
+			ShowPrivateSpaceOnboarding(controller);
+		}
+	});
 	const auto sync = box->addRow(object_ptr<Ui::LinkButton>(
 		box, tr::lng_leemen_sync_title(tr::now)));
 	sync->setClickedCallback([=] {
@@ -601,6 +644,12 @@ void ManageBox(
 		session->leemen().lock(true);
 	});
 	box->addButton(tr::lng_close(), [=] { box->closeBox(); });
+	box->setShowFinishedCallback([=] {
+		box->setShowFinishedCallback(nullptr);
+		if (weak) {
+			MaybeShowPrivateSpaceOnboarding(controller);
+		}
+	});
 }
 
 } // namespace

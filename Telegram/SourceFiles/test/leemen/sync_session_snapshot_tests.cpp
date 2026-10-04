@@ -197,7 +197,7 @@ void InvalidRecords() {
 	Check(!Readable(numericId), "numeric identity rejected instead of losing precision");
 	Check(!ReadSessionSnapshot("{}", 1), "empty object is not a valid safe snapshot");
 	Check(!ReadSessionSnapshot("", 1), "empty input is not a fabricated account");
-	Check(!ReadSessionSnapshot(std::string(1024 * 1024 + 1, ' '), 1), "oversized record bounded");
+	Check(!ReadSessionSnapshot(std::string(2 * 1024 * 1024 + 1, ' '), 1), "oversized record bounded");
 	const auto valid = Encode(Sample());
 	Check(!ReadSessionSnapshot(valid, 0), "zero user id rejected");
 	auto duplicate = valid;
@@ -275,6 +275,7 @@ void CommittedFloors() {
 	Check(coordinator.checkpoint().filterVersionFloor == 5 && coordinator.checkpoint().contentVersionFloor == 8,
 		"discarding local changes cannot erase remote reset protection");
 	auto legacy = Fixture();
+	std::get<Object>(legacy.value)["version"] = JsonValue{ JsonNumber{ "1" } };
 	std::get<Object>(legacy.value).erase("filter_version_floor");
 	std::get<Object>(legacy.value).erase("content_version_floor");
 	const auto migrated = ReadSessionSnapshot(*EncodeJson(legacy), snapshot.telegramUserId);
@@ -282,6 +283,101 @@ void CommittedFloors() {
 		"older dirty checkpoint conservatively derives observed floors from pending versions");
 	snapshot.keyFingerprint.reset();
 	Check(!EncodeSessionSnapshot(snapshot), "clean observed floors also require a master-key binding");
+}
+
+void CachedBaseline() {
+	auto snapshot = Sample();
+	auto pair = SyncPair();
+	pair.filterVersion = 4;
+	pair.contentVersion = 7;
+	pair.filter.hiddenChatIds["42"] = { "present", 3, "android", {} };
+	pair.content.perChat["42"].messageState["5"] = { "hidden", 3, "android", {} };
+	snapshot.checkpoint.confirmed = pair;
+	snapshot.checkpoint.filterVersionFloor = 4;
+	snapshot.checkpoint.contentVersionFloor = 7;
+	const auto bytes = Encode(snapshot);
+	const auto restored = ReadSessionSnapshot(bytes, snapshot.telegramUserId);
+	Check(restored && restored->checkpoint.confirmed, "confirmed cache survives offline restart");
+	Check(restored->checkpoint.confirmed->filter == pair.filter
+		&& restored->checkpoint.confirmed->content == pair.content,
+		"cached membership and access comparison preserve the exact committed pair");
+	auto coordinator = SyncCoordinator();
+	Check(coordinator.restoreCheckpoint(restored->checkpoint), "cached checkpoint restored closed");
+	Check(coordinator.cachedProjection() && !coordinator.projection(), "cache does not grant fresh mutation authority");
+	Check(!ReadSessionSnapshot(bytes, snapshot.telegramUserId + 1), "cache cannot move to another Telegram user");
+	auto legacy = *ParseJson(bytes).value;
+	std::get<Object>(legacy.value)["version"] = JsonValue{ JsonNumber{ "1" } };
+	Check(!Readable(legacy), "old schema cannot smuggle a trusted baseline");
+	std::get<Object>(legacy.value).erase("confirmed");
+	const auto old = ReadSessionSnapshot(*EncodeJson(legacy), snapshot.telegramUserId);
+	Check(old && !old->checkpoint.confirmed, "old records remain valid without granting offline trust");
+	for (const auto reset : { LocalResetState::Pending, LocalResetState::Confirmed }) {
+		auto unsafe = snapshot;
+		unsafe.reset = reset;
+		Check(!EncodeSessionSnapshot(unsafe), "destructive reset marker cannot retain usable baseline");
+	}
+	auto unsafe = snapshot;
+	unsafe.accountDeletePending = true;
+	Check(!EncodeSessionSnapshot(unsafe), "account deletion marker cannot retain usable baseline");
+	unsafe = snapshot;
+	unsafe.keyFingerprint.reset();
+	Check(!EncodeSessionSnapshot(unsafe), "cache requires key binding even before mutations");
+	for (const auto *field : { "filter", "content", "filter_version", "content_version" }) {
+		auto corrupt = *ParseJson(bytes).value;
+		std::get<Object>(std::get<Object>(corrupt.value).at("confirmed").value).erase(field);
+		Check(!Readable(corrupt), "partial cached pair is rejected");
+	}
+	unsafe = snapshot;
+	unsafe.checkpoint.confirmed->filterVersion = 5;
+	Check(!EncodeSessionSnapshot(unsafe), "cached version cannot exceed acknowledged durable floor");
+	unsafe = snapshot;
+	unsafe.checkpoint.confirmed->contentVersion = -1;
+	Check(!EncodeSessionSnapshot(unsafe), "negative cached version rejected");
+	unsafe = snapshot;
+	unsafe.checkpoint.contentVersionFloor = 8;
+	Check(EncodeSessionSnapshot(unsafe).has_value(), "partial accepted write may advance floor beyond the previous full baseline");
+	auto empty = Sample();
+	empty.checkpoint.confirmed = SyncPair();
+	Check(ReadSessionSnapshot(Encode(empty), empty.telegramUserId)->checkpoint.confirmed.has_value(),
+		"conclusively empty remote pair still marks a returning install as synced");
+	empty.keyFingerprint.reset();
+	Check(!EncodeSessionSnapshot(empty), "empty cache still requires master-key binding");
+}
+
+void LocalCheckpointBudget() {
+	auto snapshot = Sample();
+	auto pair = SyncPair();
+	pair.filterVersion = pair.contentVersion = 1;
+	pair.filter.unknownFields["payload"] = JsonValue{ std::string(261900, 'x') };
+	pair.content.unknownFields["payload"] = JsonValue{ std::string(261900, 'y') };
+	Check(EncodeFilterBlob(pair.filter).has_value() && EncodeContentBlob(pair.content).has_value(),
+		"large individual blobs stay within remote schema bounds");
+	snapshot.checkpoint.confirmed = pair;
+	snapshot.checkpoint.pending = pair;
+	snapshot.checkpoint.filterVersionFloor = snapshot.checkpoint.contentVersionFloor = 1;
+	const auto bytes = Encode(snapshot);
+	Check(bytes.size() > 1024 * 1024, "baseline and pending pair can exceed the remote aggregate budget");
+	Check(ReadSessionSnapshot(bytes, snapshot.telegramUserId).has_value(), "local four-blob checkpoint remains restorable");
+	Check(!ParseJson(bytes, { 2 * 1024 * 1024, 64, 524288 }).value,
+		"remote JSON budget cannot opt into larger checkpoint allocations implicitly");
+	const auto local = JsonLimits{ 2 * 1024 * 1024, 64, 524288, JsonBudget::LocalCheckpoint };
+	auto oversized = *ParseJson(bytes, local).value;
+	auto &confirmed = std::get<Object>(std::get<Object>(oversized.value).at("confirmed").value);
+	std::get<Object>(confirmed.at("filter").value)["payload"] = JsonValue{ std::string(kMaxBlobPlaintextBytes + 1, 'x') };
+	const auto encoded = EncodeJson(oversized, local);
+	Check(encoded && !ReadSessionSnapshot(*encoded, snapshot.telegramUserId),
+		"larger local record budget never expands an individual remote blob bound");
+	auto deep = Sample();
+	auto nested = JsonValue{ nullptr };
+	for (auto i = 0; i != 63; ++i) {
+		nested = JsonValue{ JsonValue::Array{ std::move(nested) } };
+	}
+	deep.checkpoint.confirmed = SyncPair();
+	deep.checkpoint.confirmed->filter.unknownFields["nested"] = std::move(nested);
+	Check(EncodeFilterBlob(deep.checkpoint.confirmed->filter).has_value(),
+		"remote blob at maximum standalone depth is valid");
+	Check(ReadSessionSnapshot(Encode(deep), deep.telegramUserId).has_value(),
+		"local journal accounts for wrapper depth around independently bounded blobs");
 }
 
 } // namespace
@@ -292,5 +388,7 @@ int main() {
 	InvalidRecords();
 	ConfirmedCleanup();
 	CommittedFloors();
+	CachedBaseline();
+	LocalCheckpointBudget();
 	std::cout << "Leemen sync session snapshot: " << Checks << " checks passed\n";
 }

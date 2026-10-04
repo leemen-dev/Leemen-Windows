@@ -49,6 +49,7 @@ public:
 	void start(std::unique_ptr<MTP::Config> config);
 
 	[[nodiscard]] uint64 willHaveSessionUniqueId(MTP::Config *config) const;
+	[[nodiscard]] int localIndex() const { return _localIndex; }
 	void createSession(
 		const MTPUser &user,
 		std::unique_ptr<SessionSettings> settings = nullptr);
@@ -143,6 +144,7 @@ private:
 	void destroySession(DestroyReason reason);
 
 	const not_null<Domain*> _domain;
+	const int _localIndex;
 	const std::unique_ptr<Storage::Account> _local;
 
 	std::unique_ptr<MTP::Instance> _mtp;

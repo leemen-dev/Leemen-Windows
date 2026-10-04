@@ -101,6 +101,7 @@ QByteArray SessionSettings::serialize() const {
 
 	size += Serialize::bytearraySize(leemenPrivateSpace);
 	size += Serialize::bytearraySize(_leemenSync);
+	size += sizeof(quint8);
 
 	auto result = QByteArray();
 	result.reserve(size);
@@ -195,6 +196,7 @@ QByteArray SessionSettings::serialize() const {
 		}
 		stream << leemenPrivateSpace;
 		stream << _leemenSync;
+		stream << quint8(_leemenOnboardingCompleted ? 1 : 0);
 	}
 
 	Ensures(result.size() == size);
@@ -762,6 +764,12 @@ void SessionSettings::addFromSerialized(const QByteArray &serialized) {
 	}
 	if (!stream.atEnd()) {
 		stream >> _leemenSync;
+	}
+	_leemenOnboardingCompleted = false;
+	if (!stream.atEnd()) {
+		auto completed = quint8(0);
+		stream >> completed;
+		_leemenOnboardingCompleted = (completed == 1);
 	}
 	if (stream.status() != QDataStream::Ok) {
 		LOG(("App Error: "

@@ -13,9 +13,10 @@
 #include "lang/lang_keys.h"
 #include "leemen/leemen_private_space.h"
 #include "leemen/private_message_policy.h"
-#include "main/main_session.h"
 #include "main/main_account.h"
 #include "main/main_domain.h"
+#include "main/main_session.h"
+#include "media/view/media_view_open_common.h"
 #include "mtproto/mtproto_response.h"
 #include "ui/layers/generic_box.h"
 #include "ui/widgets/buttons.h"
@@ -23,6 +24,7 @@
 #include "ui/widgets/fields/input_field.h"
 #include "ui/widgets/labels.h"
 #include "ui/widgets/popup_menu.h"
+#include "window/window_controller.h"
 #include "window/window_session_controller.h"
 
 #include <crl/crl_on_main.h>
@@ -60,11 +62,11 @@ void PublicMessagePinBox(
 	box->addRow(object_ptr<Ui::FlatLabel>(box,
 		pin ? tr::lng_pinned_pin_sure() : tr::lng_pinned_unpin_sure(), st::boxLabel));
 	const auto notify = pin && !peer->isUser()
-		? box->addRow(object_ptr<Ui::Checkbox>(box, tr::lng_pinned_notify(tr::now), false)).get()
+		? box->addRow(object_ptr<Ui::Checkbox>(box, tr::lng_pinned_notify(tr::now), false))
 		: nullptr;
 	const auto bothSides = pin && peer->isUser() && !peer->isSelf()
 		? box->addRow(object_ptr<Ui::Checkbox>(box,
-			tr::lng_leemen_public_pin_both_sides(tr::now), false)).get()
+			tr::lng_leemen_public_pin_both_sides(tr::now), false))
 		: nullptr;
 	box->addButton(pin ? tr::lng_pinned_pin() : tr::lng_pinned_unpin(), [=] {
 		if (*busy || !weakSession || !CanChangePublicPin(session, id, pin)) return;
@@ -168,6 +170,8 @@ void PublicMessagesBox(
 		not_null<Window::SessionController*> controller,
 		PeerId peerId) {
 	const auto session = &controller->session();
+	const auto weakViewerSession = base::make_weak(session);
+	const auto weakController = base::make_weak(controller);
 	const auto peer = session->data().peer(peerId);
 	struct State {
 		std::set<FullMsgId> requested;
@@ -260,6 +264,27 @@ void PublicMessagesBox(
 			const auto label = list->add(object_ptr<Ui::FlatLabel>(
 				list, rpl::single(text), st::boxLabel));
 			label->setSelectable(true);
+			const auto media = item->media();
+			if (media && Media::View::PublicMessageMediaAllowed(
+					item, media->photo(), media->document())) {
+				const auto open = list->add(object_ptr<Ui::SettingsButton>(
+					list, tr::lng_leemen_public_messages_open_attachment()));
+				open->setClickedCallback([=] {
+					if (state->closing || !weakViewerSession || !weakController
+						|| &weakController->session() != weakViewerSession.get()) return;
+					const auto current = weakViewerSession->data().message(id);
+					const auto currentMedia = current ? current->media() : nullptr;
+					if (!currentMedia || !Media::View::PublicMessageMediaAllowed(
+							current, currentMedia->photo(), currentMedia->document())) return;
+					auto request = currentMedia->photo()
+						? Media::View::OpenRequest(weakController.get(),
+							currentMedia->photo(), current, MsgId(), PeerId())
+						: Media::View::OpenRequest(weakController.get(),
+							currentMedia->document(), current, MsgId(), PeerId());
+					request.setPublicMessage();
+					weakController->window().openInMediaView(std::move(request));
+				});
+			}
 			if (!space.active()) {
 				const auto pin = !space.selfPinned(id) || !item->isPinned();
 				if (CanChangePublicPin(session, id, pin)) {

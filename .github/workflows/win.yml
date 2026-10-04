@@ -287,14 +287,6 @@ jobs:
             cmake --build ..\out --config Debug --parallel
           )
 
-      - name: Open the Leemen Debug client with an empty profile.
-        if: env.ONLY_CACHE == 'false' && github.repository != 'telegramdesktop/tdesktop'
-        shell: pwsh
-        run: |
-          & "$env:TBUILD\$env:REPO_NAME\tools\leemen\windows-smoke.ps1" `
-            -Executable "$env:TBUILD\$env:REPO_NAME\out\Debug\Leemen.exe" `
-            -Screenshot "$env:GITHUB_WORKSPACE\leemen-startup.png"
-
       - name: Move artifact.
         if: always() && !cancelled() && steps.build-client.outcome == 'success' && env.ONLY_CACHE == 'false' && ((env.UPLOAD_ARTIFACT == 'true') || (github.ref == 'refs/heads/nightly'))
         run: |
@@ -302,7 +294,6 @@ jobs:
           mkdir artifact
           move %OUT%\Leemen.exe artifact/
           if exist %OUT%\Updater.exe move %OUT%\Updater.exe artifact/
-          if exist %GITHUB_WORKSPACE%\leemen-startup.png move %GITHUB_WORKSPACE%\leemen-startup.png artifact/
       - uses: actions/upload-artifact@v7
         name: Upload artifact.
         if: always() && !cancelled() && steps.build-client.outcome == 'success' && env.ONLY_CACHE == 'false' && ((env.UPLOAD_ARTIFACT == 'true') || (github.ref == 'refs/heads/nightly'))

@@ -412,7 +412,7 @@ void Application::run() {
 	) | rpl::on_next([=](not_null<Main::Account*> account) {
 		const auto ordered = _domain->orderedAccounts();
 		const auto it = ranges::find(ordered, account);
-		if (_lastActivePrimaryWindow && it != end(ordered)) {
+		if (_lastActivePrimaryWindow && it != end(ordered) && account->maybeSession()) {
 			const auto index = std::distance(begin(ordered), it);
 			if ((index + 1) > _domain->maxAccounts()) {
 				_lastActivePrimaryWindow->show(Box(
@@ -1487,7 +1487,7 @@ not_null<Window::Controller*> Application::ensureSeparateWindowFor(
 	if (id.account && id.account->domain().privateAccounts().hidden(id.account)) {
 		if (const auto window = activePrimaryWindow()) return window;
 		if (const auto safe = id.account->domain().privateAccounts().safeAccount()) {
-			return ensureSeparateWindowFor(safe);
+			return ensureSeparateWindowFor(Window::SeparateId(not_null(safe)));
 		}
 		Unexpected("No safe primary window for a hidden account.");
 	}

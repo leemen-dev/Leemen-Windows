@@ -242,6 +242,10 @@ private:
 		not_null<QObject*> object,
 		not_null<QEvent*> e);
 	void setSession(not_null<Main::Session*> session);
+	[[nodiscard]] bool publicMediaScoped() const;
+	[[nodiscard]] bool publicMediaAllowed() const;
+	[[nodiscard]] bool publicMediaAllowed(
+		const Leemen::PublicMediaSelection &selection) const;
 
 	void playbackControlsPlay() override;
 	void playbackControlsPause() override;
@@ -642,6 +646,10 @@ private:
 
 	base::weak_ptr<Window::Controller> _openedFrom;
 	Main::Session *_session = nullptr;
+	Leemen::PublicMediaSelection _publicMediaScope;
+	std::uint64_t _lastPublicMediaRequest = 0;
+	bool _clearingBeforeHide = false;
+	rpl::lifetime _screenshotProtectionLifetime;
 	rpl::lifetime _sessionLifetime;
 	PhotoData *_photo = nullptr;
 	DocumentData *_document = nullptr;

@@ -20,6 +20,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "main/main_account.h"
 #include "main/main_domain.h"
 #include "main/main_session.h"
+#include "leemen/leemen_private_space.h"
 #include "mtproto/mtproto_config.h"
 #include "mtproto/mtproto_dc_options.h"
 #include "mtproto/mtp_instance.h"
@@ -1219,6 +1220,24 @@ void Account::writeMtpData() {
 	mtp.writeEncrypted(data, _localKey);
 }
 
+bool Account::writeMtpDataSync() {
+	Expects(_localKey != nullptr);
+	const auto expected = _owner->serializeMtpAuthorization();
+	{
+		FileWriteDescriptor file(ToFilePart(_dataNameKey), BaseGlobalPath(), true);
+		EncryptedDescriptor data(sizeof(quint32) + Serialize::bytearraySize(expected));
+		data.stream << quint32(dbiMtpAuthorization) << expected;
+		file.writeEncrypted(data, _localKey);
+	}
+	auto file = FileReadDescriptor();
+	if (!ReadEncryptedFile(file, ToFilePart(_dataNameKey), BaseGlobalPath(), _localKey)) return false;
+	auto tag = quint32();
+	auto actual = QByteArray();
+	file.stream >> tag >> actual;
+	return file.stream.status() == QDataStream::Ok && file.stream.atEnd()
+		&& tag == dbiMtpAuthorization && actual == expected;
+}
+
 void Account::readMtpData() {
 	auto context = prepareReadSettingsContext();
 
@@ -1257,6 +1276,22 @@ void Account::writeMtpConfig() {
 	EncryptedDescriptor data(size);
 	data.stream << serialized;
 	file.writeEncrypted(data, _localKey);
+}
+
+bool Account::writeMtpConfigSync() {
+	Expects(_localKey != nullptr);
+	const auto expected = _owner->mtp().config().serialize();
+	{
+		FileWriteDescriptor file(u"config"_q, _basePath, true);
+		EncryptedDescriptor data(Serialize::bytearraySize(expected));
+		data.stream << expected;
+		file.writeEncrypted(data, _localKey);
+	}
+	auto file = FileReadDescriptor();
+	if (!ReadEncryptedFile(file, u"config"_q, _basePath, _localKey)) return false;
+	auto actual = QByteArray();
+	file.stream >> actual;
+	return file.stream.status() == QDataStream::Ok && file.stream.atEnd() && actual == expected;
 }
 
 std::unique_ptr<MTP::Config> Account::readMtpConfig() {

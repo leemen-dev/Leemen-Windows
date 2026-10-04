@@ -46,6 +46,7 @@ void SwitchPinBox(
 		bool closing = false;
 	};
 	const auto state = box->lifetime().make_state<State>();
+	const auto weakBox = QPointer<Ui::GenericBox>(box.get());
 	const auto weakOwner = base::make_weak(owner);
 	const auto weakTarget = base::make_weak(target);
 	const auto accounts = QPointer<PrivateAccounts>(&owner->domain().privateAccounts());
@@ -86,11 +87,12 @@ void SwitchPinBox(
 				: create ? tr::lng_leemen_pin_format(tr::now) : tr::lng_leemen_pin_wrong(tr::now);
 			input->showError();
 		});
-		state->request = create ? accounts->setSwitchPin(weakOwner.get(), pin, std::move(done))
+		const auto request = create ? accounts->setSwitchPin(weakOwner.get(), pin, std::move(done))
 			: accounts->activateWithPin(weakTarget.get(), pin, std::move(done));
 		pin.fill(QChar(0));
+		if (weakBox && !state->closing && state->busy) state->request = request;
 	};
-	box->addButton(create ? tr::lng_save() : tr::lng_leemen_unlock(), submit);
+	box->addButton(create ? tr::lng_settings_save() : tr::lng_leemen_unlock(), submit);
 	box->addButton(tr::lng_cancel(), [=] { box->closeBox(); });
 	QObject::connect(input, &Ui::MaskedInputField::submitted, box, submit);
 	if (confirm) QObject::connect(confirm, &Ui::MaskedInputField::submitted, box, submit);
@@ -104,6 +106,7 @@ void SwitchPinBox(
 void AccountsBox(not_null<Ui::GenericBox*> box, not_null<Window::SessionController*> controller) {
 	struct State {
 		std::uint64_t request = 0;
+		bool loginBusy = false;
 		bool closing = false;
 	};
 	const auto state = box->lifetime().make_state<State>();
@@ -123,10 +126,62 @@ void AccountsBox(not_null<Ui::GenericBox*> box, not_null<Window::SessionControll
 	box->setTitle(tr::lng_leemen_accounts_title());
 	box->addRow(object_ptr<Ui::FlatLabel>(box, tr::lng_leemen_accounts_about(), st::boxLabel));
 	box->addRow(object_ptr<Ui::FlatLabel>(box, error->value(), st::boxLabel));
+	if (owner->leemen().active() && PrivateSpace::EnrollmentEnabled()) {
+		const auto add = box->addRow(object_ptr<Ui::LinkButton>(
+			box, tr::lng_leemen_accounts_add(tr::now)));
+		add->setClickedCallback([=] {
+			if (!weakOwner || !accounts || state->closing
+				|| state->request || state->loginBusy) return;
+			state->loginBusy = true;
+			const auto success = accounts->beginLogin(weakOwner.get());
+			if (!weakBox || state->closing) return;
+			state->loginBusy = false;
+			if (success) box->closeBox();
+			else *error = tr::lng_leemen_accounts_failed(tr::now);
+		});
+	}
 	for (const auto &[index, entry] : owner->domain().accounts()) {
 		const auto target = entry.get();
-		if (target == &owner->account() || !target->maybeSession()) continue;
+		if (target == &owner->account()) continue;
 		const auto weakTarget = base::make_weak(target);
+		if (accounts->pendingLogin(owner, target)) {
+			box->addRow(object_ptr<Ui::FlatLabel>(
+				box, tr::lng_leemen_accounts_login_pending(), st::boxLabel));
+			if (owner->leemen().active() && !accounts->loginCancelling(target)) {
+				const auto resume = box->addRow(object_ptr<Ui::LinkButton>(
+					box, tr::lng_leemen_accounts_login_resume(tr::now)));
+				resume->setClickedCallback([=] {
+					if (!weakOwner || !weakTarget || !accounts || state->closing
+						|| state->request || state->loginBusy) return;
+					state->loginBusy = true;
+					const auto success = accounts->resumeLogin(
+						weakOwner.get(), weakTarget.get());
+					if (!weakBox || state->closing) return;
+					state->loginBusy = false;
+					if (success) box->closeBox();
+					else *error = tr::lng_leemen_accounts_failed(tr::now);
+				});
+			}
+			const auto cancelLogin = box->addRow(object_ptr<Ui::LinkButton>(
+				box, tr::lng_leemen_accounts_login_cancel(tr::now)));
+			cancelLogin->setClickedCallback([=] {
+				if (!weakOwner || !weakTarget || !accounts || state->closing
+					|| state->request || state->loginBusy) return;
+				state->loginBusy = true;
+				const auto success = accounts->cancelLogin(
+					weakOwner.get(), weakTarget.get());
+				if (!weakBox || state->closing) return;
+				state->loginBusy = false;
+				if (!success) {
+					*error = tr::lng_leemen_accounts_failed(tr::now);
+					return;
+				}
+				box->closeBox();
+				if (weakController) ShowPrivateAccounts(weakController.get());
+			});
+			continue;
+		}
+		if (!target->maybeSession()) continue;
 		const auto hidden = accounts->hiddenBy(owner, target);
 		if (!hidden && accounts->hidden(target)) continue;
 		const auto name = target->session().user()->name();
@@ -170,12 +225,13 @@ void AccountsBox(not_null<Ui::GenericBox*> box, not_null<Window::SessionControll
 		const auto clear = box->addRow(object_ptr<Ui::LinkButton>(box, tr::lng_leemen_accounts_switch_pin_clear(tr::now)));
 		clear->setClickedCallback([=] {
 			if (!weakOwner || !accounts || state->request || state->closing) return;
-			state->request = accounts->setSwitchPin(weakOwner.get(), QString(), crl::guard(box, [=](bool success) {
+			const auto request = accounts->setSwitchPin(weakOwner.get(), QString(), crl::guard(box, [=](bool success) {
 				if (state->closing) return;
 				state->request = 0;
 				if (success) box->closeBox();
 				else *error = tr::lng_leemen_accounts_failed(tr::now);
 			}));
+			if (weakBox && !state->closing) state->request = request;
 		});
 	}
 	box->addButton(tr::lng_close(), [=] { box->closeBox(); });
